@@ -1,0 +1,217 @@
+fps: 60
+
+# Preview-only poses for Unitree's official G1 29-DoF MJCF. Angles are radians.
+# These are character-animation values, not verified physical G1 trajectories.
+motions:
+  stand:
+    keyframes:
+      - time: 0.0
+        pose: {}
+
+  notice:
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.22
+        pose:
+          waist_pitch_joint: -0.08
+          right_shoulder_pitch_joint: -0.55
+          right_shoulder_roll_joint: -0.25
+          right_elbow_joint: 0.55
+      - time: 0.55
+        pose:
+          waist_pitch_joint: -0.04
+          right_shoulder_pitch_joint: -0.42
+          right_shoulder_roll_joint: -0.18
+          right_elbow_joint: 0.42
+      - time: 1.0
+        pose: {}
+
+  wave_hand:
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.45
+        pose:
+          right_shoulder_pitch_joint: -1.35
+          right_shoulder_roll_joint: -0.75
+          right_elbow_joint: 1.25
+      - time: 0.75
+        pose:
+          right_shoulder_pitch_joint: -1.35
+          right_shoulder_roll_joint: -0.75
+          right_elbow_joint: 1.25
+          right_wrist_yaw_joint: 0.65
+      - time: 1.05
+        pose:
+          right_shoulder_pitch_joint: -1.35
+          right_shoulder_roll_joint: -0.75
+          right_elbow_joint: 1.25
+          right_wrist_yaw_joint: -0.65
+      - time: 1.35
+        pose:
+          right_shoulder_pitch_joint: -1.35
+          right_shoulder_roll_joint: -0.75
+          right_elbow_joint: 1.25
+          right_wrist_yaw_joint: 0.65
+      - time: 1.9
+        pose: {}
+
+  reach_forward:
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.45
+        pose:
+          waist_pitch_joint: -0.12
+          right_shoulder_pitch_joint: -1.0
+          right_shoulder_roll_joint: -0.12
+          right_elbow_joint: 0.35
+      - time: 0.9
+        pose:
+          waist_pitch_joint: -0.12
+          right_shoulder_pitch_joint: -1.0
+          right_shoulder_roll_joint: -0.12
+          right_elbow_joint: 0.35
+      - time: 1.4
+        pose: {}
+
+  guard:
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.35
+        pose:
+          waist_pitch_joint: 0.08
+          left_shoulder_pitch_joint: -0.8
+          left_shoulder_roll_joint: 0.28
+          left_elbow_joint: 1.05
+          right_shoulder_pitch_joint: -0.8
+          right_shoulder_roll_joint: -0.28
+          right_elbow_joint: 1.05
+      - time: 0.9
+        pose:
+          waist_pitch_joint: 0.08
+          left_shoulder_pitch_joint: -0.8
+          left_shoulder_roll_joint: 0.28
+          left_elbow_joint: 1.05
+          right_shoulder_pitch_joint: -0.8
+          right_shoulder_roll_joint: -0.28
+          right_elbow_joint: 1.05
+      - time: 1.4
+        pose: {}
+
+  look_around:
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.45
+        pose:
+          waist_yaw_joint: 0.38
+          left_shoulder_pitch_joint: -0.25
+          right_shoulder_pitch_joint: -0.1
+      - time: 1.0
+        pose:
+          waist_yaw_joint: -0.38
+          left_shoulder_pitch_joint: -0.1
+          right_shoulder_pitch_joint: -0.25
+      - time: 1.5
+        pose:
+          waist_yaw_joint: 0.28
+      - time: 2.0
+        pose: {}
+
+  surprise:
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.22
+        pose:
+          waist_pitch_joint: 0.08
+          left_shoulder_pitch_joint: -0.35
+          left_shoulder_roll_joint: 0.9
+          left_elbow_joint: 0.3
+          right_shoulder_pitch_joint: -0.35
+          right_shoulder_roll_joint: -0.9
+          right_elbow_joint: 0.3
+      - time: 0.75
+        pose:
+          left_shoulder_pitch_joint: -0.25
+          left_shoulder_roll_joint: 0.75
+          left_elbow_joint: 0.25
+          right_shoulder_pitch_joint: -0.25
+          right_shoulder_roll_joint: -0.75
+          right_elbow_joint: 0.25
+      - time: 1.3
+        pose: {}
+
+  little_dance:
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.5
+        pose:
+          left_shoulder_pitch_joint: -1.25
+          left_shoulder_roll_joint: 0.65
+          left_elbow_joint: 0.7
+          right_shoulder_pitch_joint: -1.25
+          right_shoulder_roll_joint: -0.65
+          right_elbow_joint: 0.7
+      - time: 1.0
+        pose:
+          waist_roll_joint: 0.18
+          waist_yaw_joint: 0.18
+          left_shoulder_pitch_joint: -0.75
+          left_shoulder_roll_joint: 1.0
+          left_elbow_joint: 0.55
+          right_shoulder_pitch_joint: -1.35
+          right_shoulder_roll_joint: -0.35
+          right_elbow_joint: 0.9
+      - time: 1.5
+        pose:
+          waist_roll_joint: -0.18
+          waist_yaw_joint: -0.18
+          left_shoulder_pitch_joint: -1.35
+          left_shoulder_roll_joint: 0.35
+          left_elbow_joint: 0.9
+          right_shoulder_pitch_joint: -0.75
+          right_shoulder_roll_joint: -1.0
+          right_elbow_joint: 0.55
+      - time: 2.05
+        pose:
+          waist_pitch_joint: -0.08
+          left_shoulder_pitch_joint: -0.85
+          left_shoulder_roll_joint: 0.25
+          left_elbow_joint: 1.35
+          right_shoulder_pitch_joint: -0.85
+          right_shoulder_roll_joint: -0.25
+          right_elbow_joint: 1.35
+      - time: 2.65
+        pose:
+          left_shoulder_pitch_joint: -1.25
+          left_shoulder_roll_joint: 0.65
+          left_elbow_joint: 0.7
+          right_shoulder_pitch_joint: -1.25
+          right_shoulder_roll_joint: -0.65
+          right_elbow_joint: 0.7
+      - time: 3.4
+        pose: {}
+
+  spot_target:
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.25
+        pose:
+          waist_pitch_joint: -0.06
+          right_shoulder_pitch_joint: -0.95
+          right_shoulder_roll_joint: -0.20
+          right_elbow_joint: 0.30
+      - time: 0.85
+        pose:
+          waist_pitch_joint: -0.06
+          right_shoulder_pitch_joint: -0.95
+          right_shoulder_roll_joint: -0.20
+          right_elbow_joint: 0.30
+      - time: 1.25
+        pose: {}

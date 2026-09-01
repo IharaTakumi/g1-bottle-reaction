@@ -1,0 +1,217 @@
+vision:
+  model: yolo11n.pt
+  confidence_threshold: 0.35
+
+tracking:
+  near_enter_ratio: 0.05
+  near_exit_ratio: 0.04
+  too_close_enter_ratio: 0.15
+  too_close_exit_ratio: 0.12
+  detection_confirm_seconds: 0.3
+  lost_confirm_seconds: 1.0
+  found_again_window_seconds: 8.0
+
+reaction:
+  cooldown_seconds: 2.0
+  items:
+    FOUND:
+      motion: notice
+      speech: "ん？それ……ペットボトル？"
+      speech_delay_seconds: 0.30
+      voice_profile: curious
+      priority: 20
+    NEAR:
+      motion: reach_forward
+      speech: "ちょっと見せて"
+      speech_delay_seconds: 0.25
+      voice_profile: curious
+      priority: 20
+    TOO_CLOSE:
+      motion: guard
+      speech: "うわっ、近い近い！"
+      speech_delay_seconds: 0.20
+      voice_profile: surprised
+      priority: 20
+    LOST:
+      motion: look_around
+      speech: "あれ？どこいった？"
+      speech_delay_seconds: 0.30
+      voice_profile: curious
+      priority: 20
+    FOUND_AGAIN:
+      motion: surprise
+      speech: "いた！"
+      speech_delay_seconds: 0.20
+      voice_profile: happy
+      priority: 20
+      encounter_variants:
+        - min_encounter_count: 3
+          speech: "またそれかよ"
+    MUSIC_STARTED:
+      motion: little_dance
+      speech: "お、いいね"
+      speech_delay_seconds: 0.20
+      voice_profile: happy
+      priority: 10
+    SUSPICION_STARTED:
+      motion: notice
+      speech: "……ん？"
+      speech_delay_seconds: 0.20
+      voice_profile: curious
+      priority: 40
+      bypass_cooldown: true
+    ALERT_STARTED:
+      motion: guard
+      speech: "誰かいるな"
+      speech_delay_seconds: 0.20
+      voice_profile: serious
+      priority: 60
+      bypass_cooldown: true
+    PLAYER_LOST:
+      motion: look_around
+      speech: ""
+      speech_delay_seconds: 0.0
+      voice_profile: curious
+      priority: 30
+      bypass_cooldown: true
+    RETURNED_TO_UNAWARE:
+      motion: stand
+      speech: "気のせいか……"
+      speech_delay_seconds: 0.20
+      voice_profile: neutral
+      priority: 35
+      bypass_cooldown: true
+    PLAYER_FOUND:
+      motion: spot_target
+      speech: "そこだ！"
+      speech_delay_seconds: 0.10
+      voice_profile: shout
+      priority: 100
+      bypass_cooldown: true
+
+stealth_game:
+  enabled: false
+  target:
+    detector_label: "cell phone"
+    semantic_role: PLAYER
+    confidence_threshold: 0.35
+    detection_confirm_seconds: 0.20
+    lost_grace_seconds: 0.35
+  visibility_score:
+    confidence_weight: 0.40
+    area_weight: 0.35
+    center_weight: 0.25
+    area_reference_ratio: 0.08
+  suspicion:
+    suspicious_threshold: 10.0
+    alert_threshold: 65.0
+    found_threshold: 100.0
+    gain_per_second: 40.0
+    decay_per_second: 18.0
+  found:
+    game_over_delay_seconds: 0.8
+  round:
+    auto_reset: false
+    auto_reset_seconds: 5.0
+  tracking:
+    enabled: true
+    deadzone: 0.08
+    max_preview_yaw_degrees: 25.0
+    invert_x: false
+    lost_hold_seconds: 0.5
+    suspicious_response_speed: 2.0
+    alert_response_speed: 4.0
+    found_response_speed: 6.0
+    recenter_response_speed: 1.5
+
+speech:
+  aivis:
+    base_url: http://127.0.0.1:10101
+    speaker_name: "阿井田 茂"
+    style_name: Calm
+    style_fallback_names:
+      - Mid
+    style_id: null
+    timeout_seconds: 30.0
+    cache_dir: .cache/tts
+    debug: false
+    voice_profiles:
+      neutral:
+        style_name: Calm
+        intonation_scale: 1.0
+        tempo_dynamics_scale: 1.0
+        speed_scale: 0.98
+        volume_scale: 1.0
+        pitch_scale: 0.0
+      happy:
+        style_name: Mid
+        intonation_scale: 1.1
+        tempo_dynamics_scale: 1.1
+        speed_scale: 1.0
+        volume_scale: 1.0
+        pitch_scale: 0.0
+      surprised:
+        style_name: Surprise
+        intonation_scale: 1.15
+        tempo_dynamics_scale: 1.15
+        speed_scale: 1.05
+        volume_scale: 1.05
+        pitch_scale: 0.0
+      curious:
+        style_name: Calm
+        intonation_scale: 1.08
+        tempo_dynamics_scale: 1.0
+        speed_scale: 0.95
+        volume_scale: 1.0
+        pitch_scale: 0.0
+      serious:
+        style_name: Heavy
+        intonation_scale: 1.0
+        tempo_dynamics_scale: 0.95
+        speed_scale: 0.92
+        volume_scale: 1.0
+        pitch_scale: 0.0
+      shout:
+        style_name: Shout
+        intonation_scale: 1.15
+        tempo_dynamics_scale: 1.1
+        speed_scale: 1.0
+        volume_scale: 1.05
+        pitch_scale: 0.0
+
+audio:
+  enabled: false
+  source: none
+  mode: auto
+  target_sample_rate: 16000
+  queue_max_chunks: 32
+  debug_record_seconds: 10.0
+  yamnet:
+    model_url: https://tfhub.dev/google/yamnet/1
+    cache_dir: .cache/tfhub
+    window_seconds: 1.0
+    inference_interval_seconds: 0.5
+    music_labels:
+      - Music
+      - Musical instrument
+      - Singing
+      - Pop music
+      - Rock music
+      - Hip hop music
+      - Electronic music
+      - Dance music
+      - Background music
+      - Classical music
+    top_n: 10
+  music_tracking:
+    music_start_threshold: 0.5
+    music_stop_threshold: 0.3
+    music_confirm_seconds: 1.0
+    music_lost_seconds: 2.0
+    music_cooldown_seconds: 8.0
+
+logging:
+  event_log: logs/events.jsonl
+
+simulation:
+  realtime_scale: 0.0

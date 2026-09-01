@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "g1-bottle-reaction"
+version = "0.1.0"
+description = "A Windows-first bottle reaction prototype with a replaceable Unitree G1 adapter"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  # These releases publish wheels usable by CPython 3.13 on Windows.
+  "numpy>=2.1.3,<3",
+  "opencv-python>=4.10.0.84,<5",
+  "PyYAML>=6.0.2,<7",
+  "ultralytics>=8.3.40,<9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.3,<10",
+]
+audio = [
+  # TensorFlow 2.21 publishes a CPython 3.13 Windows wheel.
+  "tensorflow>=2.21,<2.22",
+  "tensorflow-hub>=0.16.1,<0.17",
+  "sounddevice>=0.5.2,<0.6",
+  "scipy>=1.15,<2",
+  # tensorflow-hub 0.16.1 imports pkg_resources, removed in newer setuptools.
+  "setuptools>=77,<81",
+]
+sim = [
+  # MuJoCo publishes a CPython 3.13 Windows wheel.
+  "mujoco>=3.12,<4",
+]
+
+[project.scripts]
+g1-bottle-reaction = "g1_bottle_reaction.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/g1_bottle_reaction"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"config/default.yaml" = "g1_bottle_reaction/config/default.yaml"
+"config/mujoco_motions.yaml" = "g1_bottle_reaction/config/mujoco_motions.yaml"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+# Deliberately no Unitree dependency is declared here. The official SDK is
+# installed separately on the future Ubuntu robot host, never on Windows.

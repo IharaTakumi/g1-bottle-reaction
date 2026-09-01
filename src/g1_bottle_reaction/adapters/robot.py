@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingCommand:
+    target_visible: bool
+    active: bool
+    desired_yaw_rad: float
+    actual_yaw_rad: float
+    strength: float
+    game_state: str
+    status: str
+    timestamp: float
+    last_seen_seconds: float | None
+
+    @property
+    def error_yaw_rad(self) -> float:
+        return self.desired_yaw_rad - self.actual_yaw_rad
+
+
+class RobotAdapter(ABC):
+    @abstractmethod
+    def play_motion(self, motion: str) -> None:
+        """Start a named motion without blocking the vision loop."""
+
+    def set_attention_yaw(self, yaw_radians: float) -> None:
+        """Preview continuous target attention; real-G1 adapters remain a safe no-op."""
+
+    def apply_tracking(self, command: TrackingCommand) -> None:
+        """Apply a continuous attention command without invoking a discrete motion."""
+
+        self.set_attention_yaw(command.actual_yaw_rad)
+
+    def close(self) -> None:
+        """Release robot-side resources."""

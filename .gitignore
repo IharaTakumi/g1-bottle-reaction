@@ -1,0 +1,50 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+logs/*.jsonl
+logs/*.wav
+debug/*.wav
+models/unitree_mujoco/
+yolo*.pt
+.cache/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Debug audio/video
+debug/
+recordings/
+*.wav
+*.mp4
+
+# TTS cache
+cache/
+
+# ML models / downloaded weights
+*.pt
+*.pth
+*.onnx
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
