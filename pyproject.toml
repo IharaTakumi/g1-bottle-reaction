@@ -7,11 +7,13 @@ name = "g1-bottle-reaction"
 version = "0.1.0"
 description = "A Windows-first bottle reaction prototype with a replaceable Unitree G1 adapter"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
-  # These releases publish wheels usable by CPython 3.13 on Windows.
-  "numpy>=2.1.3,<3",
+  # TeleImager requires NumPy <2 on Python 3.10/3.11. Python 3.12+
+  # uses NumPy 2, including the primary CPython 3.13 Windows environment.
+  "numpy>=1.26.4,<2; python_version < '3.12'",
+  "numpy>=2.1.3,<3; python_version >= '3.12'",
   "opencv-python>=4.10.0.84,<5",
   "PyYAML>=6.0.2,<7",
   "ultralytics>=8.3.40,<9",
@@ -44,6 +46,7 @@ packages = ["src/g1_bottle_reaction"]
 [tool.hatch.build.targets.wheel.force-include]
 "config/default.yaml" = "g1_bottle_reaction/config/default.yaml"
 "config/mujoco_motions.yaml" = "g1_bottle_reaction/config/mujoco_motions.yaml"
+"config/custom_g1_motions.yaml" = "g1_bottle_reaction/config/custom_g1_motions.yaml"
 
 [tool.pytest.ini_options]
 addopts = "-q"

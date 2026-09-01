@@ -100,5 +100,5 @@ def test_stealth_reaction_mapping_and_priority(app_config) -> None:
     assert suspicion.accepted
     assert found.accepted  # higher-priority game event bypasses normal cooldown
     assert robot.motions == ["notice", "spot_target"]
-    assert speech.messages == ["……ん？", "そこだ！"]
+    assert speech.messages == ["ん？", "そこだ！"]
     assert speech.profiles == ["curious", "shout"]

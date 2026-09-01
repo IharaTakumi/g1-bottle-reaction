@@ -26,6 +26,19 @@ class RobotAdapter(ABC):
     def play_motion(self, motion: str) -> None:
         """Start a named motion without blocking the vision loop."""
 
+    def play_motion_timed(
+        self,
+        motion: str,
+        *,
+        timeline_start: float,
+        timing_debug: bool = False,
+    ) -> bool:
+        """Start motion against a shared reaction clock when supported."""
+
+        del timeline_start, timing_debug
+        self.play_motion(motion)
+        return True
+
     def set_attention_yaw(self, yaw_radians: float) -> None:
         """Preview continuous target attention; real-G1 adapters remain a safe no-op."""
 

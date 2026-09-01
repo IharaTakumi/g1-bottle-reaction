@@ -27,6 +27,24 @@ motions:
       - time: 1.0
         pose: {}
 
+  custom_notice:
+    # Preview only. Real G1 uses current pose plus separately bounded offsets.
+    keyframes:
+      - time: 0.0
+        pose: {}
+      - time: 0.20
+        pose:
+          right_shoulder_pitch_joint: -0.16
+          right_shoulder_roll_joint: -0.12
+          right_elbow_joint: 0.20
+      - time: 0.55
+        pose:
+          right_shoulder_pitch_joint: -0.14
+          right_shoulder_roll_joint: -0.10
+          right_elbow_joint: 0.17
+      - time: 1.15
+        pose: {}
+
   wave_hand:
     keyframes:
       - time: 0.0

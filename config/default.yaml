@@ -13,6 +13,7 @@ tracking:
 
 reaction:
   cooldown_seconds: 2.0
+  timeline_debug: false
   items:
     FOUND:
       motion: notice
@@ -55,7 +56,7 @@ reaction:
       priority: 10
     SUSPICION_STARTED:
       motion: notice
-      speech: "……ん？"
+      speech: "ん？"
       speech_delay_seconds: 0.20
       voice_profile: curious
       priority: 40
@@ -164,6 +165,8 @@ speech:
         speed_scale: 0.95
         volume_scale: 1.0
         pitch_scale: 0.0
+        # Short notice speech should not wait behind a long synthesized lead-in.
+        pre_phoneme_length: 0.08
       serious:
         style_name: Heavy
         intonation_scale: 1.0
@@ -209,6 +212,19 @@ audio:
     music_confirm_seconds: 1.0
     music_lost_seconds: 2.0
     music_cooldown_seconds: 8.0
+
+g1:
+  client_timeout_seconds: 10.0
+  # Official G1 arm action example holds right-hand-up for two seconds before 99.
+  arm_release_delay_seconds: 2.0
+  speaker_volume: 85
+  # Official samples use 96,000-byte chunks with a one-second pacing delay.
+  audio_chunk_bytes: 96000
+  audio_chunk_delay_seconds: 1.0
+  # VideoClient SetTimeout and bounded GetImageSample/decode retries.
+  camera_frame_timeout_seconds: 3.0
+  camera_reconnect_attempts: 3
+  camera_reconnect_delay_seconds: 0.25
 
 logging:
   event_log: logs/events.jsonl

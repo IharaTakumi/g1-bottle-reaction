@@ -48,3 +48,9 @@ cache/
 .env.*
 *.key
 *.pem
+# G1 local development environment
+.venv-g1/
+
+# G1 hardware test artifacts
+g1_camera_*.jpg
+g1_videohub_test.jpg

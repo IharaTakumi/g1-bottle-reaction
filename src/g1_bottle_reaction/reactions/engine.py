@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import queue
 import threading
 import time
@@ -11,6 +12,8 @@ from g1_bottle_reaction.adapters.speech import SpeechBackend
 from g1_bottle_reaction.config.loader import ReactionConfig
 from g1_bottle_reaction.reactions.models import Reaction
 from g1_bottle_reaction.state.events import ReactionEvent
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,12 +32,14 @@ class ReactionEngine:
         speech: SpeechBackend,
         *,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
         start_worker: bool = True,
     ) -> None:
         self.config = config
         self.robot = robot
         self.speech = speech
         self._sleep = sleep
+        self._clock = clock
         self._last_reaction_at = float("-inf")
         self._last_priority = 0
         self._queue: queue.Queue[Reaction | None] = queue.Queue()
@@ -84,15 +89,51 @@ class ReactionEngine:
         with self._lock:
             self._current = reaction
         try:
-            self.robot.play_motion(reaction.motion)
-            if reaction.speech:
-                self._sleep(reaction.speech_delay_seconds)
-                self.speech.speak(
-                    reaction.speech, voice_profile=reaction.voice_profile
+            if reaction.motion == "custom_notice":
+                started = self._clock()
+                if self.config.timeline_debug:
+                    LOGGER.info("[REACTION] custom_notice START t=0.000")
+                motion_started = self.robot.play_motion_timed(
+                    reaction.motion,
+                    timeline_start=started,
+                    timing_debug=self.config.timeline_debug,
                 )
+                if reaction.speech and motion_started:
+                    remaining = reaction.speech_delay_seconds - (
+                        self._clock() - started
+                    )
+                    if remaining > 0:
+                        self._sleep(remaining)
+                    elapsed = self._clock() - started
+                    if self.config.timeline_debug:
+                        LOGGER.info("[SPEECH] requested t=%.3f", elapsed)
+                    self.speech.speak_timed(
+                        reaction.speech,
+                        voice_profile=reaction.voice_profile,
+                        on_playback_start=(
+                            lambda: LOGGER.info(
+                                "[SPEECH] actual playback start t=%.3f",
+                                self._clock() - started,
+                            )
+                            if self.config.timeline_debug
+                            else None
+                        ),
+                    )
+            else:
+                self.robot.play_motion(reaction.motion)
+                if reaction.speech:
+                    self._sleep(reaction.speech_delay_seconds)
+                    self.speech.speak(
+                        reaction.speech, voice_profile=reaction.voice_profile
+                    )
         finally:
             with self._lock:
                 self._current = None
+
+    def execute(self, reaction: Reaction) -> None:
+        """Execute an explicit diagnostic reaction on the shared timeline."""
+
+        self._execute(reaction)
 
     def _run(self) -> None:
         while True:

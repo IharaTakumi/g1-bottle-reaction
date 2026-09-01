@@ -1,24 +1,31 @@
 # Architecture
 
 ```text
-Webcam -> YoloBottleDetector -> BottleTracker --------\
-Webcam -> YoloTargetDetector -> TargetPerception       > discrete events
-                                      -> StealthGame -/       |
-Mic ----> AudioSource -> audio queue -> YAMNet -------/       |
-                                  -> MusicStateTracker      v
-                                                ReactionEngine queue
-                                                   |-> RobotAdapter
-                                                   |     |-> Mock
-                                                   |     |-> MuJoCo animation worker
-                                                   |     `-> G1 (future hardware)
-                                                   `-> SpeechBackend
-                                                         |-> Console / Windows TTS
-                                                         `-> Aivis HTTP -> WAV cache -> AudioOutput
+OpenCV camera --\
+                  -> CameraSource -> uint8 BGR --+-> Bottle YOLO -> BottleTracker --\
+G1 VideoClient --/                              `-> Target YOLO -> StealthGame -----+-> events
+                                                                                   |
+Mic -> AudioSource -> bounded queue -> YAMNet -> MusicStateTracker ----------------/
+                                                                                   |
+                                                                                   v
+                                                                        ReactionEngine queue
+                                                                           |-> RobotAdapter
+                                                                           |     |-> Mock
+                                                                           |     |-> MuJoCo worker
+                                                                           |     `-> G1 safe actions
+                                                                           `-> SpeechBackend
+                                                                                 |-> Console/Windows TTS
+                                                                                 `-> Aivis -> WAV cache
+                                                                                              `-> AudioOutput
+                                                                                                  |-> Windows
+                                                                                                  `-> G1 speaker
 ```
 
 Stealth modeでは、YOLOのraw `cell phone` detectionを`TargetPerception`が`TargetObservation(role=PLAYER)`へ変換します。`StealthGameEngine`はraw class名、YOLO、カメラをimportせず、semantic role、visibility、confidence、正規化位置、bbox面積、monotonic timestampだけから警戒値とstate transitionを計算します。`detector_label`を`person`へ変えてもGame Engineは変更しません。
 
 離散的な`SUSPICION_STARTED`、`ALERT_STARTED`、`PLAYER_FOUND`等だけが共有Reaction Engineへ入ります。毎フレームのPLAYER方向は別の`TargetTrackingController`がFPS非依存の一次応答で`TrackingCommand`へ変換し、`RobotAdapter.apply_tracking()`へ送ります。Commandはdesired/actual yaw、strength、game state、ACTIVE/HOLD/RECENTER/LOCKED status、last-seen時間を持ちます。Mockは記録のみ、MuJoCoは実在する`waist_yaw_joint`のpreview offset、G1 adapterは未確認APIを使わないsafe no-opです。
+
+`CameraSource.read()` は入力元に関係なくOpenCV互換のHxWx3 `uint8` BGR frameだけを返します。`OpenCVCameraSource`は従来の`VideoCapture`を、`G1CameraSource`は既存Windows DDS compatibility layer、公式`VideoClient.GetImageSample()`、JPEG decodeを隔離します。標準`videohub_pc4`を利用し、serviceを停止・killしません。`TeleImagerCameraSource`は明示的なlegacy optionだけです。YOLO、Target Perception、Bottle Trackerは入力元を知りません。
 
 `vision` は1フレームから最大のbottle検出と `proximity_ratio` を返します。`state` は時刻付きの検出情報だけを受け取るためYOLO非依存です。`reactions` はイベントをYAML定義のMotion/Speechへ変換し、worker threadで順次実行します。
 
@@ -38,8 +45,12 @@ MuJoCoと公式modelはoptionalです。adapter moduleはMuJoCoをtop-level impo
 
 Reactionは固定textにoptionalな `voice_profile` 名だけを持ちます。Reaction Engineはmotionを即時queueした後、既存のspeech delayを待って `SpeechBackend.speak(text, voice_profile=...)` を呼びます。Aivis固有のHTTP、style ID、AudioQuery、cache、WAV再生はadapter内部にあり、Reaction Engine、Vision、Audio perception、MuJoCoからは見えません。
 
-`AivisSpeechBackend` は `/speakers` で実modelにあるstyleを解決し、`/audio_query`へprofile parameterを適用して `/synthesis`からWAVを得ます。`SpeechCache`は合成条件のSHA-256でWAVを保存し、`AudioOutput`が現在はWindows PC speakerへ再生します。将来G1 speakerへ変更する場合もsynthesizer/cacheは維持し、output境界だけを交換します。
+`AivisSpeechBackend` は `/speakers` で実modelにあるstyleを解決し、`/audio_query`へprofile parameterを適用して `/synthesis`からWAVを得ます。`SpeechCache`は合成条件のSHA-256でWAVを保存します。`WindowsWaveOutput`はPC speakerへ、`G1AudioOutput`はWAVを16 kHz mono signed PCM16 little-endianへ変換して公式`AudioClient.PlayStream()`へ送ります。合成と出力先は分離したままです。
 
-Windowsでは `MockRobotAdapter`、optionalな `MujocoRobotAdapter`、Windows/console speechを使用します。Unitree importは `G1RobotAdapter.initialize()` の内部だけにあり、コア、simulation、テストのimport graphには入りません。
+Windowsでは `MockRobotAdapter`、optionalな `MujocoRobotAdapter`、Windows/console speechを使用します。直接のUnitree importは`adapters/g1_robot.py`のlazy `UnitreeSdkRuntime`だけにあり、G1 cameraはsourceを開く時に同runtimeからVideoClientを生成します。legacy TeleImager importも明示的にsourceを開く時まで遅延されます。コア、simulation、テストのimport graphにはどちらも入りません。
+
+実機motionは、三重の安全gate通過後にだけlazy-loaded `G1ArmActionClient`を初期化し、`GetActionList()`で実機のAction IDを確認します。`notice`はright hand up ID 23（設定時間後にrelease ID 99）、`spot_target`はhigh wave ID 26へ写像します。`3104`はRPC timeout warningとして扱い、自動retryしません。`guard`、`look_around`、`little_dance`、`reach_forward`、`surprise`、`stand`と連続trackingはwarning付きsafe no-opです。MuJoCo qpos、joint trajectory、tracking yawを実機へ送る経路はありません。Action開始・終了の確定は将来`rt/arm/action/state`購読で行うTODOです。
+
+追加opt-inされた`custom_notice`だけは、独立した`CustomArmMotionController`が公式arm7 DDS flowを使います。pure-Python trajectory coreはLowState base pose、YAML relative offsets、smoothstep、range margin、per-step limitを処理し、Unitree importを持ちません。DDS transportは`g1_robot.py`内に隔離されます。preset Actionとcustom controllerはownership lockで排他されます。Reaction Engineはcustom motionだけ共通monotonic timelineでnon-blocking dispatchし、cache済みspeechを設定時刻へscheduleします。
 
 イベントのみをJSON Linesで記録します。`source` は `vision`、`audio`、`stealth_game` です。カメラ画像、PCM、毎フレームの状態は保存しません。

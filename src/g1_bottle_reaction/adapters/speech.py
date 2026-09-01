@@ -4,9 +4,10 @@ from abc import ABC, abstractmethod
 import logging
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from g1_bottle_reaction.adapters.aivis_speech import AudioOutput
     from g1_bottle_reaction.config.loader import AivisSpeechConfig
 
 LOGGER = logging.getLogger(__name__)
@@ -16,6 +17,17 @@ class SpeechBackend(ABC):
     @abstractmethod
     def speak(self, text: str, *, voice_profile: str = "neutral") -> None:
         """Speak or otherwise emit text."""
+
+    def speak_timed(
+        self,
+        text: str,
+        *,
+        voice_profile: str = "neutral",
+        on_playback_start: Callable[[], None] | None = None,
+    ) -> None:
+        if on_playback_start is not None:
+            on_playback_start()
+        self.speak(text, voice_profile=voice_profile)
 
 
 class ConsoleSpeechBackend(SpeechBackend):
@@ -100,6 +112,7 @@ def create_speech_backend(
     mode: str,
     *,
     aivis_config: "AivisSpeechConfig | None" = None,
+    audio_output: "AudioOutput | None" = None,
     debug: bool = False,
 ) -> SpeechBackend:
     if mode == "console":
@@ -111,7 +124,7 @@ def create_speech_backend(
             raise ValueError("AivisSpeech configuration is required")
         from .aivis_speech import AivisSpeechBackend
 
-        return AivisSpeechBackend(aivis_config, debug=debug)
+        return AivisSpeechBackend(aivis_config, output=audio_output, debug=debug)
     if mode != "auto":
         raise ValueError(f"Unknown speech mode: {mode}")
     fallback: SpeechBackend
@@ -124,7 +137,10 @@ def create_speech_backend(
 
         try:
             return AivisSpeechBackend(
-                aivis_config, fallback=fallback, debug=debug
+                aivis_config,
+                output=audio_output,
+                fallback=fallback,
+                debug=debug,
             )
         except (AivisSpeechError, RuntimeError) as exc:
             LOGGER.info("AivisSpeech unavailable (%s); using fallback speech", exc)

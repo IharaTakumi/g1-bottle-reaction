@@ -49,6 +49,7 @@ class TrackingConfig:
 class ReactionConfig:
     cooldown_seconds: float
     items: dict[str, Reaction]
+    timeline_debug: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +205,7 @@ class VoiceProfileConfig:
     speed_scale: float
     volume_scale: float
     pitch_scale: float = 0.0
+    pre_phoneme_length: float | None = None
 
     def validate(self, name: str) -> None:
         ranges = {
@@ -219,6 +221,12 @@ class VoiceProfileConfig:
                     f"voice profile '{name}' {field_name} must be between "
                     f"{minimum} and {maximum}"
                 )
+        if self.pre_phoneme_length is not None and not (
+            0.0 <= self.pre_phoneme_length <= 1.0
+        ):
+            raise ValueError(
+                f"voice profile '{name}' pre_phoneme_length must be between 0 and 1"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +248,34 @@ class SpeechConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class G1Config:
+    client_timeout_seconds: float
+    arm_release_delay_seconds: float
+    speaker_volume: int
+    audio_chunk_bytes: int
+    audio_chunk_delay_seconds: float
+    camera_frame_timeout_seconds: float
+    camera_reconnect_attempts: int
+    camera_reconnect_delay_seconds: float
+
+    def validate(self) -> None:
+        if self.client_timeout_seconds <= 0:
+            raise ValueError("g1 client_timeout_seconds must be positive")
+        if self.arm_release_delay_seconds < 0:
+            raise ValueError("g1 arm_release_delay_seconds cannot be negative")
+        if not 0 <= self.speaker_volume <= 100:
+            raise ValueError("g1 speaker_volume must be between 0 and 100")
+        if self.audio_chunk_bytes <= 0 or self.audio_chunk_delay_seconds < 0:
+            raise ValueError("g1 audio chunk settings are invalid")
+        if self.camera_frame_timeout_seconds <= 0:
+            raise ValueError("g1 camera_frame_timeout_seconds must be positive")
+        if self.camera_reconnect_attempts < 1:
+            raise ValueError("g1 camera_reconnect_attempts must be at least 1")
+        if self.camera_reconnect_delay_seconds < 0:
+            raise ValueError("g1 camera_reconnect_delay_seconds cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     vision: VisionConfig
     tracking: TrackingConfig
@@ -247,6 +283,7 @@ class AppConfig:
     stealth_game: StealthGameConfig
     audio: AudioConfig
     speech: SpeechConfig
+    g1: G1Config
     event_log: Path
     simulation_realtime_scale: float
 
@@ -326,6 +363,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             speed_scale=float(item.get("speed_scale", 1.0)),
             volume_scale=float(item.get("volume_scale", 1.0)),
             pitch_scale=float(item.get("pitch_scale", 0.0)),
+            pre_phoneme_length=(
+                float(item["pre_phoneme_length"])
+                if item.get("pre_phoneme_length") is not None
+                else None
+            ),
         )
         for name, item in aivis_raw["voice_profiles"].items()
     }
@@ -335,12 +377,15 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         profile.validate(name)
     if float(aivis_raw.get("timeout_seconds", 30.0)) <= 0:
         raise ValueError("speech.aivis.timeout_seconds must be positive")
+    g1 = G1Config(**raw["g1"])
+    g1.validate()
     return AppConfig(
         vision=VisionConfig(**raw["vision"]),
         tracking=tracking,
         reaction=ReactionConfig(
             cooldown_seconds=float(reaction_raw["cooldown_seconds"]),
             items=reactions,
+            timeline_debug=bool(reaction_raw.get("timeline_debug", False)),
         ),
         stealth_game=stealth_game,
         audio=AudioConfig(
@@ -390,6 +435,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 voice_profiles=profiles,
             )
         ),
+        g1=g1,
         event_log=Path(raw["logging"]["event_log"]),
         simulation_realtime_scale=float(raw["simulation"].get("realtime_scale", 0)),
     )

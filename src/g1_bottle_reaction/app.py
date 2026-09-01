@@ -31,6 +31,7 @@ from g1_bottle_reaction.stealth.target_perception import (
     YoloTargetDetector,
 )
 from g1_bottle_reaction.stealth.tracking import TargetTrackingController
+from g1_bottle_reaction.vision.camera import CameraSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,7 +435,7 @@ def run_tracking_preview(
 def run_stealth_webcam(
     app: StealthGameApp,
     *,
-    camera: int,
+    camera_source: CameraSource,
     headless: bool = False,
     audio_monitor: AudioMonitor | None = None,
     audio_source_label: str = "none",
@@ -453,10 +454,11 @@ def run_stealth_webcam(
         detector_label=target_config.detector_label,
         semantic_role=target_config.semantic_role,
     )
-    capture = cv2.VideoCapture(camera)
-    if not capture.isOpened():
+    try:
+        camera_source.open()
+    except Exception:
         app.close()
-        raise RuntimeError(f"Could not open camera {camera}")
+        raise
 
     previous_frame_at = time.monotonic()
     fps = 0.0
@@ -475,9 +477,7 @@ def run_stealth_webcam(
             ):
                 print(format_audio_debug(audio_monitor.last_update), flush=True)
                 last_printed_audio = audio_monitor.last_update
-            ok, frame = capture.read()
-            if not ok:
-                raise RuntimeError("Webcam frame capture failed")
+            frame = camera_source.read()
             now = time.monotonic()
             elapsed = now - previous_frame_at
             if elapsed > 0:
@@ -532,7 +532,7 @@ def run_stealth_webcam(
     finally:
         if audio_monitor is not None:
             audio_monitor.stop()
-        capture.release()
+        camera_source.close()
         cv2.destroyAllWindows()
         app.close()
 
@@ -605,7 +605,7 @@ def _draw_stealth_overlay(
 def run_webcam(
     app: BottleReactionApp,
     *,
-    camera: int,
+    camera_source: CameraSource,
     headless: bool = False,
     audio_monitor: AudioMonitor | None = None,
     audio_source_label: str = "none",
@@ -618,10 +618,11 @@ def run_webcam(
     detector = YoloBottleDetector(
         app.config.vision.model, app.config.vision.confidence_threshold
     )
-    capture = cv2.VideoCapture(camera)
-    if not capture.isOpened():
+    try:
+        camera_source.open()
+    except Exception:
         app.close()
-        raise RuntimeError(f"Could not open camera {camera}")
+        raise
 
     previous_frame_at = time.monotonic()
     fps = 0.0
@@ -640,9 +641,7 @@ def run_webcam(
             ):
                 print(format_audio_debug(audio_monitor.last_update), flush=True)
                 last_printed_audio = audio_monitor.last_update
-            ok, frame = capture.read()
-            if not ok:
-                raise RuntimeError("Webcam frame capture failed")
+            frame = camera_source.read()
             now = time.monotonic()
             elapsed = now - previous_frame_at
             if elapsed > 0:
@@ -681,7 +680,7 @@ def run_webcam(
     finally:
         if audio_monitor is not None:
             audio_monitor.stop()
-        capture.release()
+        camera_source.close()
         cv2.destroyAllWindows()
         app.close()
 

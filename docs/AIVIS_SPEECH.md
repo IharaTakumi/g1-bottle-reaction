@@ -57,6 +57,8 @@ Reactions keep their original fixed text and add one lightweight profile name. I
 
 Profiles set `style_name`, `intonationScale`, `tempoDynamicsScale`, `speedScale`, `volumeScale`, and `pitchScale`. AivisSpeech defines `intonationScale` as selected-style emotion strength and `tempoDynamicsScale` as tempo variation. Defaults deliberately stay near 1.0–1.3. `pitchScale` remains 0.0 because changing it may degrade quality.
 
+The `curious` profile additionally sets `prePhonemeLength=0.08` for the cached short utterance `ん？`. The generated cache WAV began audible content at about 98 ms using a -40 dB threshold, so destructive waveform trimming is not applied.
+
 For 阿井田 茂, `neutral` and `curious` select `Calm`, `happy` selects `Mid`, `surprised` selects `Surprise`, `serious` selects `Heavy`, and the future `shout` profile selects `Shout`. These profile styles also fall back to the resolved default when an installed model does not provide the requested name.
 
 Edit `config/default.yaml`, then compare quickly:
@@ -81,4 +83,4 @@ The existing Reaction worker starts motion first, waits only the configured spee
 
 Explicit `--speech aivis` fails clearly when the Engine is unavailable. `--speech auto` tries AivisSpeech, then Windows Japanese TTS, then console. Runtime Aivis failure in auto mode also delegates the same text/profile to the selected fallback.
 
-`AudioOutput` is separate from synthesis and caching. `WindowsWaveOutput` currently uses the standard-library Windows WAV player. A future verified G1 output can consume the same cached WAV without moving Aivis HTTP code into `G1RobotAdapter`.
+`AudioOutput` is separate from synthesis and caching. `WindowsWaveOutput` uses the standard-library Windows WAV player. `G1AudioOutput` consumes the same cached WAV, converts it to 16 kHz mono signed PCM16 little-endian, and sends it through the official Unitree `AudioClient`; Aivis HTTP code does not move into `G1RobotAdapter`.

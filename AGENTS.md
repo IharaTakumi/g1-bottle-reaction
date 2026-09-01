@@ -1,7 +1,7 @@
 # Development guide
 
 - Windows 11 with the mock adapter and Python 3.13 is the current primary environment.
-- Keep every Unitree dependency and import isolated to `adapters/g1_robot.py`; never guess undocumented Unitree APIs.
+- Keep every direct Unitree SDK import isolated to the lazy runtime in `adapters/g1_robot.py`; G1 speaker code may consume that runtime but must not import SDK symbols itself.
 - Real-robot behavior must remain an explicit opt-in guarded by `--enable-real-robot`.
 - The state machine and reaction engine must stay independent of Unitree, YOLO, and webcam hardware.
 - Run `pytest` after changes and keep `--simulate` working without a model, camera, network, or Unitree SDK.
@@ -18,3 +18,9 @@
 - Raw detector labels must not leak into stealth game rules; `cell phone` currently maps to semantic `PLAYER` and must remain swappable with `person`.
 - Reaction Engine handles discrete game events; continuous target tracking stays outside it.
 - Stealth simulation must remain testable without a camera or YOLO model, and no unverified real-G1 tracking API may be added.
+- Camera consumers accept only the `CameraSource` BGR contract; the primary G1 path is videohub_pc4 + official VideoClient, while TeleImager remains isolated as a legacy option.
+- Never stop or kill G1 `videohub_pc4`; VideoClient read/decode retry belongs inside `G1CameraSource`.
+- Real G1 motion is limited to verified `G1ArmActionClient` IDs advertised by `GetActionList()`, requires `--robot g1 --enable-real-robot --g1-motion safe-actions`, and must print the safety banner; never retry RPC timeout 3104 automatically.
+- Real `custom_notice` additionally requires `--g1-custom-motion`; it may command only verified right shoulder pitch/roll and right elbow indices as current LowState plus bounded YAML offsets, must never copy MuJoCo qpos, and must release arm_sdk weight on completion/error.
+- Preset arm Actions and custom arm_sdk control must share exclusive ownership; never force takeover when completion or ownership is uncertain.
+- On Windows, resolve the G1 NIC alias to IPv4 and patch the SDK channel config only for the locked initialization call; never edit the Unitree SDK checkout or add Linux tracing paths to the Windows config.

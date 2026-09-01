@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 import sys
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib import error, parse, request
 
 from g1_bottle_reaction.config.loader import AivisSpeechConfig, VoiceProfileConfig
@@ -198,17 +198,32 @@ class AivisSpeechBackend(SpeechBackend):
         )
 
     def speak(self, text: str, *, voice_profile: str = "neutral") -> None:
+        self.speak_timed(text, voice_profile=voice_profile)
+
+    def speak_timed(
+        self,
+        text: str,
+        *,
+        voice_profile: str = "neutral",
+        on_playback_start: Callable[[], None] | None = None,
+    ) -> None:
         try:
             path, cache_hit, style, profile_name, profile = self._prepare(
                 text, voice_profile
             )
             self._log_debug(cache_hit, style, profile_name, profile)
+            if on_playback_start is not None:
+                on_playback_start()
             self.output.play_wav(path)
         except (AivisSpeechError, OSError, RuntimeError) as exc:
             if self.fallback is None:
                 raise
             LOGGER.warning("AivisSpeech failed (%s); using fallback speech", exc)
-            self.fallback.speak(text, voice_profile=voice_profile)
+            self.fallback.speak_timed(
+                text,
+                voice_profile=voice_profile,
+                on_playback_start=on_playback_start,
+            )
 
     def precache(
         self, text: str, *, voice_profile: str = "neutral"
@@ -389,6 +404,8 @@ def apply_voice_profile(
     query["speedScale"] = profile.speed_scale
     query["volumeScale"] = profile.volume_scale
     query["pitchScale"] = profile.pitch_scale
+    if profile.pre_phoneme_length is not None:
+        query["prePhonemeLength"] = profile.pre_phoneme_length
 
 
 def format_speakers(speakers: tuple[AivisSpeaker, ...]) -> str:

@@ -1,0 +1,60 @@
+# Real-G1 relative arm motion parameters. Joint indices come from Unitree's
+# example/g1/high_level/g1_arm7_sdk_dds_example.py. Ranges come from the
+# official unitree_mujoco G1 29-DoF MJCF. These are not MuJoCo qpos commands.
+update_period_seconds: 0.02
+low_state_timeout_seconds: 2.0
+kp: 60.0
+kd: 1.5
+safety_margin_radians: 0.10
+max_delta_per_step_radians: 0.02
+release_duration_seconds: 0.10
+speech_delay_seconds: 0.25
+
+joints:
+  right_shoulder_pitch:
+    sdk_index: 22
+    model_joint: right_shoulder_pitch_joint
+    minimum: -3.0892
+    maximum: 2.6704
+  right_shoulder_roll:
+    sdk_index: 23
+    model_joint: right_shoulder_roll_joint
+    minimum: -2.2515
+    maximum: 1.5882
+  right_elbow:
+    sdk_index: 25
+    model_joint: right_elbow_joint
+    minimum: -1.0472
+    maximum: 2.0944
+
+amplitude_profiles:
+  small:
+    scale: 0.25
+  medium:
+    scale: 0.50
+  demo:
+    scale: 1.00
+
+motions:
+  custom_notice:
+    keyframes:
+      - time: 0.00
+        offsets:
+          right_shoulder_pitch: 0.00
+          right_shoulder_roll: 0.00
+          right_elbow: 0.00
+      - time: 0.20
+        offsets:
+          right_shoulder_pitch: -0.16
+          right_shoulder_roll: -0.12
+          right_elbow: 0.20
+      - time: 0.55
+        offsets:
+          right_shoulder_pitch: -0.14
+          right_shoulder_roll: -0.10
+          right_elbow: 0.17
+      - time: 1.15
+        offsets:
+          right_shoulder_pitch: 0.00
+          right_shoulder_roll: 0.00
+          right_elbow: 0.00

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This viewer previews reaction timing and character expression on a G1-shaped model. It does not simulate a controller or validate motion safety. The path is:
+This viewer previews reaction timing and character expression on a G1-shaped model. It does not simulate a controller or validate motion safety. `custom_notice` is also available as a preview, but its real-G1 implementation uses separate current-pose-relative data. The path is:
 
 ```text
 Bottle / Audio event
@@ -70,7 +70,7 @@ little_dance:
         right_shoulder_pitch_joint: -1.25
 ```
 
-The names come from Unitree's official `g1_29dof.xml`; no joints are invented. Current preview motions are `stand`, `notice`, `wave_hand`, `reach_forward`, `guard`, `look_around`, `surprise`, and `little_dance`.
+The names come from Unitree's official `g1_29dof.xml`; no joints are invented. Current preview motions are `stand`, `notice`, `custom_notice`, `wave_hand`, `reach_forward`, `guard`, `look_around`, `surprise`, `little_dance`, and `spot_target`.
 
 Each omitted joint eases toward its `stand` value. Keyframes use smoothstep ease-in/out at the configured 60 fps. At model load, joint names are resolved and official `jnt_range` values are read. Unknown joints produce a warning and are ignored. Out-of-range angles produce a warning and are clamped.
 

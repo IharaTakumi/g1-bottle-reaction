@@ -1,6 +1,8 @@
 # G1 Bottle Reaction Prototype
 
-Windows 11上でWebカメラのペットボトルを検出し、時間方向の状態変化からMock Robotの動作表示とPC音声を発生させる先行プロトタイプです。現在の主開発環境は **Python 3.13** です。Unitree G1実機には接続しません。
+Windows 11上でWebカメラのペットボトルを検出し、時間方向の状態変化からMock Robotの動作表示とPC音声を発生させる先行プロトタイプです。現在の主開発環境は **Python 3.13** です。default起動ではUnitree G1へ接続せず、Phase 1実機経路だけを明示的なCLIで有効化します。
+
+対応Pythonは **3.10以上** です。通常のWindows開発環境はPython 3.13を維持し、公式`unitree_sdk2_python`と`cyclonedds==0.10.2`を使うG1用venvはPython 3.10を使用します。Python 3.10/3.11ではlegacy TeleImagerとも共存可能なNumPy 1.26系、Python 3.12以降ではNumPy 2系をdependency markerで選択します。
 
 ## Windowsセットアップ
 
@@ -22,6 +24,27 @@ python -m pip install -e ".[audio,dev]"
 ```
 
 TensorFlow/YAMNet/sounddevice/SciPyはaudio extraだけに含まれます。Bottle-only環境はTensorFlowなしで従来どおりimport・実行できます。
+
+G1用Python 3.10環境は通常環境と分離します。
+
+```powershell
+py -3.10 -m venv .venv-g1
+.\.venv-g1\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+python -m pip install -e C:\dev\unitree_sdk2_python
+```
+
+Unitree公式packageが要求する`cyclonedds==0.10.2`は変更しません。Unitree SDKは通常のWindows 3.13環境へは入れず、`.venv-g1`だけへ導入します。TeleImagerは標準G1 cameraには不要です。
+
+WindowsのUnitree DDS初期化では、`--network-interface`をWindowsの`InterfaceAlias`として`Get-NetIPAddress`でIPv4へ解決します。公式SDKを呼ぶ間だけ`ChannelConfigHasInterface`を`NetworkInterface address="..."`形式へ一時差し替え、Linux用`/tmp/cdds.LOG` tracingを除外します。SDK repositoryのファイル自体は変更せず、呼び出し後は元のconfigへ戻します。直接IPv4を指定する場合は`--network-address`を使用できます。
+
+```powershell
+python -m g1_bottle_reaction --g1-test connection --network-interface "イーサネット 3"
+python -m g1_bottle_reaction --g1-test connection --network-address 192.168.123.222
+```
+
+Linuxでは従来どおり`--network-interface eth0`を公式name方式へ渡し、config差し替えを行いません。
 
 ## 実行
 
@@ -57,7 +80,7 @@ Webcam -> YOLO cell phone -> Target Perception -> PLAYER observation
 
 PLAYER追跡は高頻度制御なのでReaction Engineを使いません。`TargetTrackingController`はraw observationとgame stateから`TrackingCommand`（visible、desired/actual yaw、strength、state、status、last-seen時間）を生成します。center Xはdeadzoneを除いた範囲を最大±25度へ線形変換し、`invert_x`で左右反転できます。actual yawは`alpha = 1 - exp(-response * dt)`の一次応答で補間するためFPS非依存です。初期responseはSUSPICIOUS=2、ALERT=4、FOUND=6、recenter=1.5です。
 
-MuJoCoでは公式29-DoF modelから実在を確認した`waist_yaw_joint`へ、`base motion yaw + tracking offset`として加算し、モデルrange内へclampします。実モデルrangeは±2.618 radですが、controller側を±25度に制限します。検出消失後0.5秒は最後の方向を保持し、その後recenterします。FOUNDで最後の方向をlockし、GAME_OVER中の新しい位置入力は無視します。R resetはdesired yawとlast-seen/lockを消去し、滑らかに正面へ戻します。実G1 adapterは安全なno-opで、未確認Unitree APIは呼びません。
+MuJoCoでは公式29-DoF modelから実在を確認した`waist_yaw_joint`へ、`base motion yaw + tracking offset`として加算し、モデルrange内へclampします。実モデルrangeは±2.618 radですが、controller側を±25度に制限します。検出消失後0.5秒は最後の方向を保持し、その後recenterします。FOUNDで最後の方向をlockし、GAME_OVER中の新しい位置入力は無視します。R resetはdesired yawとlast-seen/lockを消去し、滑らかに正面へ戻します。実G1 adapterのtrackingは安全なno-opで、未確認Unitree APIは呼びません。
 
 カメラやYOLOなしでゲーム全体を確認します。
 
@@ -280,7 +303,55 @@ python -m g1_bottle_reaction --robot mujoco --camera 0 --speech aivis --audio-so
 
 `--speech aivis`はEngineへ接続できなければ明確なエラーで終了します。`--speech auto`はAivisSpeech、Windows日本語TTS、consoleの順にfallbackします。MotionはReaction workerから直ちに開始され、設定delay後のHTTP合成・再生も同じ既存worker上で行うため、Camera、YOLO、microphone、YAMNet、MuJoCo Viewerをブロックしません。
 
-API・cache・将来G1 speakerへ出力先を交換する境界は [docs/AIVIS_SPEECH.md](docs/AIVIS_SPEECH.md) を参照してください。
+API・cache・G1 speakerへ出力先を交換する境界は [docs/AIVIS_SPEECH.md](docs/AIVIS_SPEECH.md) を参照してください。
+
+## G1 Hardware Integration Phase 1
+
+G1では入力元だけを公式SDK2 `VideoClient`へ交換し、既存YOLO以降をそのまま使います。
+
+```text
+G1 D435i -> videohub_pc4 -> VideoClient JPEG -> G1CameraSource -> BGR -> existing YOLO/game
+AivisSpeech -> existing WAV cache -> G1AudioOutput -> G1 speaker
+Reaction -> G1RobotAdapter -> verified G1ArmActionClient actions only
+```
+
+Windowsの既定は従来どおり`--camera-source opencv --audio-output windows --g1-motion disabled`です。Unitree SDKはlazy importされ、通常のWindows依存関係には入りません。
+
+G1 camera単独診断（Robot、YOLO、Speechは起動しません）:
+
+```bash
+python -m g1_bottle_reaction --g1-test camera --network-interface "イーサネット 3"
+```
+
+G1 speaker単独診断（motionは送りません）:
+
+```bash
+python -m g1_bottle_reaction --g1-test speaker --network-interface eth0 --wav test.wav
+```
+
+G1 camera + game logicのみ:
+
+```bash
+python -m g1_bottle_reaction --game stealth-phone --robot mock --camera-source g1 --network-interface "イーサネット 3" --speech console
+```
+
+G1 camera + AivisSpeechのG1 speaker出力:
+
+```bash
+python -m g1_bottle_reaction --game stealth-phone --robot mock --camera-source g1 --speech aivis --audio-output g1 --network-interface "イーサネット 3"
+```
+
+実機motionは`--robot g1 --enable-real-robot --g1-motion safe-actions`の3指定を必須とし、起動時に`GetActionList()`で実機のAction IDを確認してから`REAL G1 MOTION ENABLED`を表示します。`notice`は`G1ArmActionClient.ExecuteAction(23)`（right hand up）と2秒後のrelease `ExecuteAction(99)`、`spot_target`は`ExecuteAction(26)`（high wave）へ写像します。timeout既定値は公式exampleと同じ10秒です。それ以外の抽象motionとreal trackingはsafe no-opです。
+
+`ExecuteAction()`のreturn code `3104`はRPC timeoutとしてwarningに記録します。Actionが実際には開始している可能性があるため、失敗とは断定せず自動retryもしません。Actionの開始・終了確認は将来`rt/arm/action/state`購読を追加するTODOです。
+
+SDK setup、connection/camera/speaker/waveの順序、full commandは [docs/G1_INTEGRATION.md](docs/G1_INTEGRATION.md) を参照してください。標準camera pathはG1の`videohub_pc4`を利用し、本projectはこのserviceを停止・killしません。TeleImagerは`--camera-source g1-teleimager`のlegacy optionとしてだけ残していますが、camera device競合の可能性があるためprimary pathには使用しません。
+
+## G1 custom_notice
+
+`custom_notice`は右肩pitch/rollと右肘だけを、実LowStateの現在姿勢から小さいrelative offsetで動かします。公式arm7 DDS exampleの`rt/lowstate`、`rt/arm_sdk`、control weight/releaseフローを使用し、MuJoCo poseを実機へコピーしません。実機defaultは`small`（肩pitch -0.04、肩roll -0.03、肘 +0.05 rad）です。joint margin、per-step delta、timing、profileは`config/custom_g1_motions.yaml`で管理します。
+
+段階試験は必ずdry-run、MuJoCo、実機small motionのみ、cache済み「ん？」付き、最後にStealth統合の順です。実機には既存三重gateと追加`--g1-custom-motion`が必要です。`SUSPICION_STARTED`はdefaultでは従来`notice`のままで、`--enable-custom-notice-reaction`を指定した場合だけ切り替わります。詳しい安全設計とコマンドは [docs/CUSTOM_G1_MOTION.md](docs/CUSTOM_G1_MOTION.md) を参照してください。
 
 ## 設定
 
@@ -293,6 +364,7 @@ API・cache・将来G1 speakerへ出力先を交換する境界は [docs/AIVIS_S
 - Motion、台詞、MotionからSpeechまでのdelay
 - JSON Linesイベントログの保存先
 - Audio window、推論間隔、music labels、start/stop threshold、confirm/lost/cooldown
+- G1 client timeout、arm release delay、speaker volume、audio chunk、camera reconnect
 
 別設定は `--config path\to\settings.yaml` で指定できます。`proximity_ratio` はbounding box面積を画像全体の面積で割った疑似指標であり、実距離ではありません。
 
@@ -306,16 +378,21 @@ API・cache・将来G1 speakerへ出力先を交換する境界は [docs/AIVIS_S
 - bounding box、confidence、状態、イベント、リアクション、台詞、遭遇回数、FPSの表示
 - `logs/events.jsonl` へのイベント記録
 - Windows microphoneの非同期YAMNet Music判定と共有Reaction queue
+- OpenCV/G1 VideoClientを交換できるBGR `CameraSource`
+- AivisSpeech cache WAVを16 kHz mono PCM16へ変換するG1 speaker出力
+- 明示的な三重gate付きの`G1ArmActionClient`実機mapping
 
 ## 現在できないこと・前提
 
 - Webカメラだけでは実距離を測定しません。
-- G1の抽象Motion名は公式APIとの対応を実機確認できていないため、G1 adapterでは安全なno-opです。
-- G1 AudioClientによる音声送信、D435i入力、G1実機上の安全検証は未実装です。
+- G1 cameraは実機確認済みの`videohub_pc4` + `VideoClient.GetImageSample()`経路を使用します。
+- G1の`guard`、`look_around`、`little_dance`、`reach_forward`、`surprise`、`stand`は安全なno-opです。起動時Action Listに必要IDがない場合も対象motionを送りません。
+- G1 D435iからはVideoClient JPEGをdecodeしたBGRだけを使い、depthは未使用です。
 - G1 built-in microphone取得は未接続です。将来は `WindowsMicSource` だけを `G1MicSource` へ交換します。
+- G1 real closed-loop tracking、歩行、navigation、low-level joint controlは未実装です。
 - 複数のボトルを人物ごとに追跡せず、画面上で最大の1本だけを対象にします。
 
-G1モードはUbuntu側でも `--robot g1` だけでは開始できず、`--enable-real-robot` とnetwork interfaceを明示的に要求します。移植作業は [docs/G1_INTEGRATION.md](docs/G1_INTEGRATION.md)、マイクは [docs/G1_AUDIO_INTEGRATION.md](docs/G1_AUDIO_INTEGRATION.md) を参照してください。
+G1実機motionはUbuntu側でも `--robot g1` だけでは開始できず、`--enable-real-robot`、`--g1-motion safe-actions`、network interfaceを明示的に要求します。移植作業は [docs/G1_INTEGRATION.md](docs/G1_INTEGRATION.md)、マイクは [docs/G1_AUDIO_INTEGRATION.md](docs/G1_AUDIO_INTEGRATION.md) を参照してください。
 
 ## テスト
 

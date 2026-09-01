@@ -20,6 +20,7 @@ from g1_bottle_reaction.simulation.motion import (
 EXPECTED_MOTIONS = (
     "stand",
     "notice",
+    "custom_notice",
     "wave_hand",
     "reach_forward",
     "guard",

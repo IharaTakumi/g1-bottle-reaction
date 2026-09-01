@@ -178,6 +178,34 @@ def test_voice_profile_config_and_audio_query_modification(app_config) -> None:
         "volumeScale": 1.0,
         "pitchScale": 0.0,
     }
+    curious = app_config.speech.aivis.voice_profiles["curious"]
+    curious_query: dict[str, float] = {}
+    apply_voice_profile(curious_query, curious)
+    assert curious_query["prePhonemeLength"] == pytest.approx(0.08)
+
+
+def test_custom_notice_speech_is_precached_and_reused(app_config, tmp_path) -> None:
+    transport = FakeTransport()
+    client = AivisSpeechClient(
+        "http://127.0.0.1:10101", timeout_seconds=1, transport=transport
+    )
+    output = RecordingOutput()
+    backend = AivisSpeechBackend(
+        _config(app_config, tmp_path), client=client, output=output
+    )
+    _, first_hit = backend.precache("ん？", voice_profile="curious")
+    _, second_hit = backend.precache("ん？", voice_profile="curious")
+    assert not first_hit
+    assert second_hit
+    assert sum("/synthesis?" in url for _, url, _ in transport.calls) == 1
+    playback_starts = []
+    backend.speak_timed(
+        "ん？",
+        voice_profile="curious",
+        on_playback_start=lambda: playback_starts.append(len(output.paths)),
+    )
+    assert playback_starts == [0]
+    assert len(output.paths) == 1
 
 
 def test_http_synthesis_and_cached_wav_reuse(app_config, tmp_path) -> None:
