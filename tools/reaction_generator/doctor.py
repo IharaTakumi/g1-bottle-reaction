@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -109,7 +110,7 @@ def collect_checks() -> list[Check]:
     checks: list[Check] = []
     windows_build = sys.getwindowsversion().build if sys.platform == "win32" else None
     windows_name = "Windows 11" if windows_build is not None and windows_build >= 22000 else platform.system()
-    checks.append(Check("OK", "Windows", f"{windows_name} build {windows_build}" if windows_build else platform.platform()))
+    checks.append(Check("OK", "OS", f"{windows_name} build {windows_build}" if windows_build else platform.platform()))
     checks.append(Check("OK", "Host Python", f"{platform.python_version()} ({sys.executable})"))
     try:
         import torch as host_torch
@@ -128,7 +129,7 @@ def collect_checks() -> list[Check]:
         Check(
             "OK" if LOCAL_CONFIG_PATH.is_file() else "ERROR",
             "Saved configuration",
-            str(LOCAL_CONFIG_PATH) if LOCAL_CONFIG_PATH.is_file() else f"Missing: {LOCAL_CONFIG_PATH}; run setup.ps1",
+            str(LOCAL_CONFIG_PATH) if LOCAL_CONFIG_PATH.is_file() else f"Missing: {LOCAL_CONFIG_PATH}; run setup_ubuntu.sh (Ubuntu) or setup.ps1 (Windows)",
         )
     )
     try:
@@ -143,7 +144,7 @@ def collect_checks() -> list[Check]:
         ("GMR", environment.gmr_root, Path("general_motion_retargeting/__init__.py")),
     ):
         if root is None:
-            checks.append(Check("ERROR", label, f"root not configured; run setup.ps1 or set {label}_ROOT"))
+            checks.append(Check("ERROR", label, f"root not configured; run setup_ubuntu.sh (Ubuntu) or setup.ps1 (Windows) or set {label}_ROOT"))
         elif (root / marker).is_file():
             checks.append(Check("OK", label, str(root)))
         else:
@@ -168,13 +169,13 @@ def collect_checks() -> list[Check]:
 
     gvhmr_root = environment.gvhmr_root
     gmr_root = environment.gmr_root
-    if gvhmr_root is not None and environment.gvhmr_runtime.is_wsl:
+    if gvhmr_root is not None and (environment.gvhmr_runtime.is_wsl or sys.platform.startswith("linux")):
         checks.extend(
             _probe_python(
                 "GVHMR",
                 environment.gvhmr_runtime,
                 gvhmr_root,
-                ("torch", "torchvision", "pytorch3d", "lightning", "hydra", "cv2", "ultralytics", "hmr4d"),
+                ("torch", "torchvision", "pytorch3d", "pytorch3d.ops", "lightning", "pytorch_lightning", "hydra", "colorlog", "yacs", "cv2", "ultralytics", "hmr4d"),
             )
         )
     elif gvhmr_root is not None:
@@ -204,7 +205,7 @@ def collect_checks() -> list[Check]:
 
     if gmr_root is not None:
         model_root = gmr_root / "assets" / "body_models" / "smplx"
-        candidates = (model_root / "SMPLX_NEUTRAL.npz", model_root / "SMPLX_NEUTRAL.pkl")
+        candidates = (model_root / "SMPLX_NEUTRAL.npz",)
         existing = next((path for path in candidates if path.is_file() and path.stat().st_size >= 1024 * 1024), None)
         checks.append(
             Check(
@@ -234,10 +235,59 @@ def collect_checks() -> list[Check]:
         vswhere = Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
         vs_detail = "detected but not required" if vswhere.is_file() else "not detected and not required"
         checks.append(Check("INFO", "Visual Studio Build Tools", f"{vs_detail}; the selected WSL2/Linux PyTorch3D wheel avoids a native build"))
+    elif sys.platform.startswith("linux"):
+        checks.extend(_ubuntu_checks(environment))
     elif shutil.which("cl.exe"):
         checks.append(Check("OK", "Visual Studio Build Tools", str(shutil.which("cl.exe"))))
     else:
         checks.append(Check("WARN", "Visual Studio Build Tools", "not detected"))
+    return checks
+
+
+def _ubuntu_checks(environment) -> list[Check]:
+    checks = []
+    tools = _REPOSITORY_ROOT / ".reaction-tools"
+    checks.append(_check_file("micromamba", tools / "bin/micromamba"))
+    for name in ("gvhmr", "gmr"):
+        checks.append(_check_file(name + " environment", tools / "envs" / name / "bin/python"))
+    try:
+        result = _run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"])
+        checks.append(Check("OK" if result.returncode == 0 else "ERROR", "NVIDIA GPU / driver", (result.stdout or result.stderr).strip()))
+    except (OSError, subprocess.SubprocessError) as exc:
+        checks.append(Check("ERROR", "NVIDIA GPU / driver", str(exc)))
+    # Exercise real kernels; is_available() alone misses unsupported GPU architectures.
+    code = (
+        "import torch; from pytorch3d.ops import knn_points; "
+        "x=torch.randn(1,32,3,device='cuda'); "
+        "y=x@torch.eye(3,device='cuda'); "
+        "assert torch.isfinite(knn_points(x,y).dists).all(); "
+        "torch.cuda.synchronize(); print(torch.cuda.get_device_name(0))"
+    )
+    try:
+        result = _run(environment.gvhmr_runtime.probe_command(code, cwd=_REPOSITORY_ROOT))
+        checks.append(Check("OK" if result.returncode == 0 else "ERROR", "CUDA / PyTorch3D kernel", (result.stdout if result.returncode == 0 else result.stderr)[-1800:].strip()))
+    except (OSError, subprocess.SubprocessError) as exc:
+        checks.append(Check("ERROR", "CUDA / PyTorch3D kernel", str(exc)))
+    baseline = tools / "locks/g1-before.txt"
+    g1_python = _REPOSITORY_ROOT / ".venv-g1/bin/python"
+    if baseline.is_file() and g1_python.is_file():
+        try:
+            result = _run([str(g1_python), "-m", "pip", "freeze"])
+            unchanged = result.returncode == 0 and sorted(result.stdout.splitlines()) == sorted(baseline.read_text().splitlines())
+            checks.append(Check("OK" if unchanged else "ERROR", "existing G1 environment unchanged", "pip freeze matches baseline" if unchanged else "dependency list differs or could not be read"))
+        except (OSError, subprocess.SubprocessError) as exc:
+            checks.append(Check("ERROR", "existing G1 environment unchanged", str(exc)))
+    else:
+        checks.append(Check("WARN", "existing G1 environment unchanged", "baseline or .venv-g1 unavailable; not verified"))
+    fingerprints = tools / "locks/host-before.json"
+    if fingerprints.is_file():
+        for path, expected in json.loads(fingerprints.read_text()).items():
+            file = Path(path)
+            matches = file.is_file() and hashlib.sha256(file.read_bytes()).hexdigest() == expected
+            checks.append(Check("OK" if matches else "ERROR", "host file unchanged", path))
+    checks.append(Check("OK" if (_REPOSITORY_ROOT / "input/surprised_01.mp4").is_file() else "WARN", "sample video", str(_REPOSITORY_ROOT / "input/surprised_01.mp4")))
+    if environment.gvhmr_root:
+        checks.append(Check("INFO", "Licensed model placement", "Download from https://smpl.is.tue.mpg.de/ and https://smpl-x.is.tue.mpg.de/ under your license. Paths are listed above."))
     return checks
 
 
@@ -257,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[{check.level}] {check.name}: {check.message}")
         if any(check.level == "ERROR" for check in checks):
             print("\nReaction generator prerequisites are incomplete.")
-            print("Run tools/reaction_generator/setup.ps1, then rerun this doctor.")
+            print("Run tools/reaction_generator/setup_ubuntu.sh on Ubuntu, then rerun this doctor.")
         else:
             print("\nReaction generator is ready.")
     return 2 if any(check.level == "ERROR" for check in checks) else 0

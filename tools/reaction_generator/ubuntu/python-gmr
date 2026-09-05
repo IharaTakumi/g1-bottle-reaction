@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/runtime.sh"
+exec "$reaction_project/.reaction-tools/bin/micromamba" --no-rc run -p "$reaction_project/.reaction-tools/envs/gmr" python "$@"

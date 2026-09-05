@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/runtime.sh"
+# Upstream checkpoints use the pre-2.6 torch.load default. Only this subprocess
+# loads the documented upstream checkpoints / locally generated results.
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+exec "$reaction_project/.reaction-tools/bin/micromamba" --no-rc run -p "$reaction_project/.reaction-tools/envs/gvhmr" python "$@"
