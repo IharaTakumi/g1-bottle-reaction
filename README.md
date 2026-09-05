@@ -307,6 +307,10 @@ API・cache・G1 speakerへ出力先を交換する境界は [docs/AIVIS_SPEECH.
 
 ## G1 Hardware Integration Phase 1
 
+現在のSLAM runtimeはG1搭載PC2で実行します。[PC2環境準備](docs/G1_PC2_RUNTIME.md)と[新規map・localization手順](docs/G1_NEW_MAP_LOCALIZATION.md)を参照してください。DesktopはWi-Fi/SSH操作端末として使います。
+
+以前のDesktop Ethernet/DDS調査は[過去の環境記録](docs/G1_LOCAL_ENV.md)に残しています。現行runtimeの実行手順ではありません。
+
 G1では入力元だけを公式SDK2 `VideoClient`へ交換し、既存YOLO以降をそのまま使います。
 
 ```text
@@ -426,3 +430,7 @@ python -m pytest
 ```
 
 テストはカメラ、マイク、YOLO/YAMNetモデル、TensorFlow、インターネット、Unitree SDKを必要としません。
+
+## 共有Ubuntu PCでの動画→G1腕モーション生成
+
+既存G1環境と分離したproject-local micromamba環境を使います。初回は `bash tools/reaction_generator/setup_ubuntu.sh`、診断は `python3 tools/reaction_generator/doctor.py`。モデル配置、GVHMR→GMRの単体確認、生成、削除は [Ubuntu手順](tools/reaction_generator/README_UBUNTU.md) を参照してください。

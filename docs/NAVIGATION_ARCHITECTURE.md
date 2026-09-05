@@ -205,3 +205,7 @@ Priority order for the next real-device session:
 Intentionally still absent: mapping, relocation, waypoint registration, route
 editing, Node/Edge DDS, LiDAR processing, obstacle avoidance, geofencing,
 AprilTag support, velocity-command patrol, and a waypoint GUI.
+
+最新の実機READ ONLY調査: [G1_NAVIGATION_READONLY.md](G1_NAVIGATION_READONLY.md)。
+
+SLAM初期化・map確認・API副作用の静的調査: [G1_SLAM_OPERATIONS.md](G1_SLAM_OPERATIONS.md)。実機APIは未実行です。

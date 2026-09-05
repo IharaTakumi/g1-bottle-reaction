@@ -55,3 +55,26 @@ tools/reaction_generator/environment.local.json
 # G1 hardware test artifacts
 g1_camera_*.jpg
 g1_videohub_test.jpg
+
+# Isolated video-to-reaction environments and caches
+.reaction-tools/
+.reaction-cache/
+
+# Robot-side environments, runtime artifacts and private connection files
+.venv-robot/
+.runtime/
+.vendor/
+.ssh/
+*.pcd
+*.ply
+*.las
+*.laz
+*.bag
+*.db3
+*.db3-wal
+*.db3-shm
+*.mcap
+rosbag/
+rosbag2/
+mapping_runs/
+*.err

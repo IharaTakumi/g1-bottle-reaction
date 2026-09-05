@@ -113,6 +113,29 @@ class UnitreeSdkRuntime:
             ) from exc
         return channel_module
 
+    def load_readonly_low_state_type(self) -> Any:
+        """Load the G1 state schema without initializing channels or clients."""
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
+
+        return LowState_
+
+    def load_readonly_slam_types(self) -> tuple[Any, Any]:
+        """Schemas for observed SLAM telemetry only; no service initialization."""
+        from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
+        from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+
+        return Odometry_, String_
+
+    def load_readonly_navigation_types(self) -> dict[str, Any]:
+        """Telemetry schemas only; never initialize a channel or RPC client."""
+        from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
+        from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
+        from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+
+        return {"odometry": Odometry_, "cloud": PointCloud2_,
+                "string": String_, "odomstate": SportModeState_}
+
     def _load_video_client_type(self) -> Any:
         if self._video_client_loader is not None:
             return self._video_client_loader()

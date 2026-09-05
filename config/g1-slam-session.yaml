@@ -1,0 +1,16 @@
+# Local commissioning policy, not manufacturer accuracy guarantees.
+interface: eth0
+runtime_address: 192.168.123.164
+slam_server_address: 192.168.123.161
+rpc_timeout_s: 10.0
+telemetry_max_age_s: 1.0
+stable_window_s: 2.0
+stable_min_samples: 10
+stable_translation_m: 0.05
+stable_rotation_rad: 0.10
+quaternion_norm_tolerance: 0.02
+max_seed_age_s: 300.0
+localization_translation_m: 0.50
+localization_rotation_rad: 0.35
+expected_frame: map
+expected_child_frame: base_link
