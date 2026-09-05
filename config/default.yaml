@@ -226,6 +226,15 @@ g1:
   camera_reconnect_attempts: 3
   camera_reconnect_delay_seconds: 0.25
 
+navigation:
+  default_route_id: outer-loop
+  command_timeout_s: 2.0
+  status_poll_interval_s: 0.05
+  heartbeat_interval_s: 0.5
+  heartbeat_timeout_s: 2.0
+  reaction_completion_timeout_s: 10.0
+  auto_pause_for_reaction: true
+
 logging:
   event_log: logs/events.jsonl
 

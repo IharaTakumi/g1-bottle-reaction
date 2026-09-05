@@ -1,0 +1,34 @@
+format_version: 1
+output_fps: 50
+
+# Zero-phase exponential smoothing removes video/pose jitter without adding a
+# visible time offset. This is applied before resampling and safety limiting.
+smoothing:
+  time_constant_seconds: 0.05
+
+scaling:
+  waist:
+    yaw: 0.50
+    roll: 0.25
+    pitch: 0.25
+  arms: 0.80
+
+blend:
+  in_seconds: 0.20
+  out_seconds: 0.35
+
+safety:
+  # Margin inside the official G1 29-DoF MJCF joint ranges.
+  joint_margin_rad: 0.05
+  # Conservative authoring limits, not verified real-G1 performance limits.
+  # Runtime playback must apply its own limits from the measured start pose.
+  max_velocity_rad_s:
+    waist: 0.60
+    shoulder: 1.50
+    elbow: 1.50
+    wrist: 2.00
+  max_offset_rad:
+    waist: 0.25
+    shoulder: 1.00
+    elbow: 1.00
+    wrist: 0.75

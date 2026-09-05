@@ -12,9 +12,11 @@ from g1_bottle_reaction.audio.models import Prediction
 from g1_bottle_reaction.audio.music_tracker import AudioTrackingUpdate, MusicStateTracker
 from g1_bottle_reaction.audio.pipeline import AudioMonitor
 from g1_bottle_reaction.adapters.robot import RobotAdapter, TrackingCommand
+from g1_bottle_reaction.adapters.navigation import NavigationAdapter
 from g1_bottle_reaction.adapters.speech import SpeechBackend
 from g1_bottle_reaction.config.loader import AppConfig, StealthTrackingConfig
 from g1_bottle_reaction.event_log import JsonlEventLogger
+from g1_bottle_reaction.navigation.coordinator import NavigationCoordinator
 from g1_bottle_reaction.reactions.engine import ReactionEngine
 from g1_bottle_reaction.state.bottle_tracker import BottleTracker, TrackingUpdate
 from g1_bottle_reaction.state.events import ReactionEvent
@@ -62,12 +64,40 @@ class BottleReactionApp:
         config: AppConfig,
         robot: RobotAdapter,
         speech: SpeechBackend,
+        navigation: NavigationAdapter | None = None,
     ) -> None:
         self.config = config
         self.robot = robot
         self.tracker = BottleTracker(config.tracking)
-        self.engine = ReactionEngine(config.reaction, robot, speech)
         self.event_logger = JsonlEventLogger(config.event_log)
+        self.navigation_coordinator = (
+            NavigationCoordinator(
+                navigation,
+                command_timeout_s=config.navigation.command_timeout_s,
+                status_poll_interval_s=config.navigation.status_poll_interval_s,
+                auto_pause_for_reaction=config.navigation.auto_pause_for_reaction,
+                event_sink=self.event_logger.write_navigation,
+            )
+            if navigation is not None
+            else None
+        )
+        lifecycle = (
+            self.navigation_coordinator
+            if self.navigation_coordinator is not None
+            and config.navigation.auto_pause_for_reaction
+            else None
+        )
+        self.engine = ReactionEngine(
+            config.reaction,
+            robot,
+            speech,
+            lifecycle_observer=lifecycle,
+            motion_completion_timeout_s=(
+                config.navigation.reaction_completion_timeout_s
+                if lifecycle is not None
+                else None
+            ),
+        )
         self.last_update: TrackingUpdate | None = None
         self.last_event = "-"
         self.last_reaction = "-"
@@ -147,7 +177,18 @@ class BottleReactionApp:
         return decision
 
     def close(self) -> None:
-        self.engine.close(wait=True)
+        try:
+            self.engine.close(wait=True)
+        finally:
+            if self.navigation_coordinator is not None:
+                self.navigation_coordinator.close()
+
+    def start_patrol(self, route_id: str | None = None):
+        if self.navigation_coordinator is None:
+            raise RuntimeError("Navigation is disabled")
+        return self.navigation_coordinator.start_patrol(
+            route_id or self.config.navigation.default_route_id
+        )
 
 
 class StealthGameApp(BottleReactionApp):
@@ -158,8 +199,9 @@ class StealthGameApp(BottleReactionApp):
         config: AppConfig,
         robot: RobotAdapter,
         speech: SpeechBackend,
+        navigation: NavigationAdapter | None = None,
     ) -> None:
-        super().__init__(config, robot, speech)
+        super().__init__(config, robot, speech, navigation)
         self.game = StealthGameEngine(config.stealth_game)
         self.target_tracking = TargetTrackingController(
             config.stealth_game.tracking, robot

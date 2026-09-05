@@ -48,6 +48,7 @@ cache/
 .env.*
 *.key
 *.pem
+tools/reaction_generator/environment.local.json
 # G1 local development environment
 .venv-g1/
 

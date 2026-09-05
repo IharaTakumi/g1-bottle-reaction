@@ -353,6 +353,31 @@ SDK setup、connection/camera/speaker/waveの順序、full commandは [docs/G1_I
 
 段階試験は必ずdry-run、MuJoCo、実機small motionのみ、cache済み「ん？」付き、最後にStealth統合の順です。実機には既存三重gateと追加`--g1-custom-motion`が必要です。`SUSPICION_STARTED`はdefaultでは従来`notice`のままで、`--enable-custom-notice-reaction`を指定した場合だけ切り替わります。詳しい安全設計とコマンドは [docs/CUSTOM_G1_MOTION.md](docs/CUSTOM_G1_MOTION.md) を参照してください。
 
+## 動画からの上半身リアクション生成（offline）
+
+人の短い動画を外部GVHMR/GMRへ渡し、G1 29-DoFモデルの腰・両腕17 jointだけを50 Hzの相対offset資産へ変換するoffline toolを用意しています。脚、root移動、リアルタイム模倣、実機送信は対象外です。
+
+```bash
+python tools/reaction_generator/generate.py input/surprised.mp4 --name surprised
+python tools/reaction_generator/preview_motion.py motions/surprised.npz --inspect-only
+```
+
+外部環境の構築、WSL2/Ubuntuの推奨構成、生成物の安全境界、MuJoCo previewは [tools/reaction_generator/README.md](tools/reaction_generator/README.md) を参照してください。生成資産が存在しても実機motionは有効化されず、現在のReaction Engineや`G1RobotAdapter`へは接続していません。
+
+## Navigation（Windows Mock / 将来のSLAM bridge）
+
+NavigationはRobot Adapterとは独立した能力です。実機SLAM接続はまだ未実装ですが、
+Windowsだけで巡回中のReaction pause/resumeを確認できます。
+
+```powershell
+python -m g1_bottle_reaction --navigation mock --navigation-test status
+python -m g1_bottle_reaction --simulate-stealth --robot mock --speech mute --navigation mock --start-patrol outer-loop
+```
+
+実機側を動かし得る`start_patrol` / `resume`は、将来のRemote接続でも
+`--enable-real-navigation`を明示しない限りAdapter内で拒否されます。設計、安全契約、
+次回G1接続時のTODOは[docs/NAVIGATION_ARCHITECTURE.md](docs/NAVIGATION_ARCHITECTURE.md)を参照してください。
+
 ## 設定
 
 `config/default.yaml` には以下があります。

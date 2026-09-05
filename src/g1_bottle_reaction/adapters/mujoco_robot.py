@@ -160,6 +160,10 @@ class MujocoRobotAdapter(RobotAdapter):
             raise RuntimeError(f"MuJoCo animation failed: {self._error}") from self._error
         return ready
 
+    def wait_for_motion_complete(self, motion: str, timeout: float | None = None) -> bool:
+        del motion
+        return self.wait_for_idle(timeout)
+
     def wait_until_viewer_closed(self) -> None:
         if self._viewer is None:
             raise RuntimeError("MuJoCo viewer was not launched")

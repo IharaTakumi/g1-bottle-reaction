@@ -89,7 +89,9 @@ def test_verified_motion_mapping_and_required_release() -> None:
     )
     adapter.initialize()
     adapter.play_motion("notice")
+    assert adapter.wait_for_motion_complete("notice", timeout=0.1)
     adapter.play_motion("spot_target")
+    assert not adapter.wait_for_motion_complete("spot_target", timeout=0.1)
     adapter.play_motion("guard")
     adapter.play_motion("little_dance")
     assert runtime.client.execute_calls == [23, 99, 26]
@@ -142,6 +144,7 @@ def test_timed_out_releasable_action_is_still_released_once(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         adapter.play_motion("notice")
     assert runtime.client.execute_calls == [23, 99]
+    assert not adapter.wait_for_motion_complete("notice", timeout=0.1)
 
 
 def test_other_execute_failure_is_reported() -> None:
@@ -254,6 +257,7 @@ def test_custom_notice_requires_opt_in_and_dispatches_controller() -> None:
             {"timeline_start": 12.0, "timing_debug": True},
         )
     ]
+    assert adapter.wait_for_motion_complete("custom_notice", timeout=0.1)
 
 
 def test_preset_action_is_rejected_while_custom_owns_arm() -> None:

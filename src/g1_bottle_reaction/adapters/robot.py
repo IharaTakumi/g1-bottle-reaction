@@ -47,5 +47,16 @@ class RobotAdapter(ABC):
 
         self.set_attention_yaw(command.actual_yaw_rad)
 
+    def wait_for_motion_complete(self, motion: str, timeout: float | None = None) -> bool:
+        """Return true only when completion of the named motion is confirmed.
+
+        Adapters without a reliable completion signal deliberately return false.
+        Normal reaction behavior does not call this method unless an orchestrator
+        explicitly requires physical completion confirmation.
+        """
+
+        del motion, timeout
+        return False
+
     def close(self) -> None:
         """Release robot-side resources."""

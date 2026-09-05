@@ -21,10 +21,13 @@ from g1_bottle_reaction.adapters.g1_robot import (
     probe_g1_connection,
 )
 from g1_bottle_reaction.adapters.mock_robot import MockRobotAdapter
+from g1_bottle_reaction.adapters.mock_navigation import MockNavigationAdapter
+from g1_bottle_reaction.adapters.navigation import NavigationAdapter, NavigationTransport
 from g1_bottle_reaction.adapters.mujoco_robot import (
     MujocoRobotAdapter,
     default_g1_model_path,
 )
+from g1_bottle_reaction.adapters.remote_navigation import RemoteNavigationAdapter
 from g1_bottle_reaction.adapters.robot import RobotAdapter
 from g1_bottle_reaction.adapters.speech import create_speech_backend
 from g1_bottle_reaction.app import (
@@ -78,6 +81,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="run deterministic music-score simulation without audio dependencies",
     )
     parser.add_argument("--robot", choices=("mock", "mujoco", "g1"), default="mock")
+    parser.add_argument(
+        "--navigation",
+        choices=("disabled", "mock", "remote"),
+        default="disabled",
+        help="independent navigation capability backend",
+    )
+    parser.add_argument("--enable-real-navigation", action="store_true")
+    parser.add_argument("--navigation-endpoint")
+    parser.add_argument(
+        "--navigation-test", choices=("health", "status", "pose")
+    )
+    parser.add_argument(
+        "--start-patrol",
+        nargs="?",
+        const="__DEFAULT_ROUTE__",
+        metavar="ROUTE_ID",
+        help="start the default or specified route after application startup",
+    )
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument(
         "--camera-source",
@@ -210,6 +231,41 @@ def _create_robot(args: argparse.Namespace, config) -> RobotAdapter:
     return adapter
 
 
+def _create_navigation(
+    args: argparse.Namespace,
+    config,
+    *,
+    transport: NavigationTransport | None = None,
+    start_heartbeat: bool = True,
+) -> NavigationAdapter | None:
+    if args.navigation == "disabled":
+        if args.enable_real_navigation or args.navigation_endpoint:
+            raise ValueError(
+                "Navigation flags require --navigation mock or --navigation remote"
+            )
+        return None
+    if args.navigation == "mock":
+        return MockNavigationAdapter()
+    if not args.navigation_endpoint:
+        raise ValueError("--navigation remote requires --navigation-endpoint")
+    if transport is None:
+        raise RuntimeError(
+            "No Ubuntu bridge transport is implemented yet; inject a verified "
+            "NavigationTransport after the bridge protocol is selected"
+        )
+    adapter = RemoteNavigationAdapter(
+        args.navigation_endpoint,
+        transport,
+        real_navigation_enabled=args.enable_real_navigation,
+        command_timeout_s=config.navigation.command_timeout_s,
+        heartbeat_interval_s=config.navigation.heartbeat_interval_s,
+        heartbeat_timeout_s=config.navigation.heartbeat_timeout_s,
+    )
+    if start_heartbeat:
+        adapter.start_heartbeat()
+    return adapter
+
+
 def _create_camera_source(args: argparse.Namespace, config) -> CameraSource:
     if args.camera_source == "opencv":
         return OpenCVCameraSource(args.camera)
@@ -325,6 +381,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config = load_config(args.config)
         config = _apply_custom_notice_overrides(config, args)
+        if args.navigation_test is not None:
+            _run_navigation_diagnostic(args, config)
+            return 0
         if args.g1_test is not None:
             _run_g1_diagnostic(args, config)
             return 0
@@ -361,13 +420,22 @@ def main(argv: list[str] | None = None) -> int:
                 "--record-audio-debug requires --audio-source windows"
             )
         robot = _create_robot(args, config)
+        try:
+            navigation = _create_navigation(args, config)
+        except Exception:
+            robot.close()
+            raise
         if args.preview_motion is not None:
+            if navigation is not None:
+                navigation.close()
             if not isinstance(robot, MujocoRobotAdapter):
                 robot.close()
                 raise ValueError("--preview-motion requires --robot mujoco")
             _run_motion_preview(robot, args.preview_motion)
             return 0
         if args.preview_tracking:
+            if navigation is not None:
+                navigation.close()
             if not isinstance(robot, MujocoRobotAdapter):
                 robot.close()
                 raise ValueError("--preview-tracking requires --robot mujoco")
@@ -386,6 +454,8 @@ def main(argv: list[str] | None = None) -> int:
             and not args.simulate_audio
             and not args.simulate_stealth
         ):
+            if navigation is not None:
+                navigation.close()
             print("MuJoCo viewer is ready; close the viewer or press Ctrl+C to stop")
             try:
                 robot.wait_until_viewer_closed()
@@ -406,13 +476,24 @@ def main(argv: list[str] | None = None) -> int:
             )
         except Exception:
             robot.close()
+            if navigation is not None:
+                navigation.close()
             raise
         stealth_mode = args.game == "stealth-phone" or args.simulate_stealth
         app = (
-            StealthGameApp(config, robot, speech)
+            StealthGameApp(config, robot, speech, navigation)
             if stealth_mode
-            else BottleReactionApp(config, robot, speech)
+            else BottleReactionApp(config, robot, speech, navigation)
         )
+        if args.start_patrol is not None:
+            route_id = (
+                None if args.start_patrol == "__DEFAULT_ROUTE__" else args.start_patrol
+            )
+            try:
+                app.start_patrol(route_id)
+            except Exception:
+                app.close()
+                raise
         if args.audio_file is not None:
             if args.record_audio_debug is not None:
                 raise ValueError(
@@ -475,6 +556,25 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, RuntimeError, ValueError, KeyError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+
+def _run_navigation_diagnostic(args: argparse.Namespace, config) -> None:
+    navigation = _create_navigation(
+        args,
+        config,
+        start_heartbeat=False,
+    )
+    if navigation is None:
+        raise ValueError("--navigation-test requires an enabled navigation backend")
+    try:
+        if args.navigation_test == "health":
+            print(f"Navigation health: {'OK' if navigation.health() else 'NOT HEALTHY'}")
+        elif args.navigation_test == "status":
+            print(f"Navigation status: {navigation.status()}")
+        else:
+            print(f"Navigation pose: {navigation.pose()}")
+    finally:
+        navigation.close()
 
 
 def _run_g1_diagnostic(args: argparse.Namespace, config) -> None:

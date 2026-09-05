@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Lock
 
 from g1_bottle_reaction.reactions.models import Reaction
+from g1_bottle_reaction.navigation.models import NavigationStatus
 from g1_bottle_reaction.state.bottle_tracker import TrackingUpdate
 from g1_bottle_reaction.state.events import ReactionEvent
 from g1_bottle_reaction.stealth.models import GameEvent, GameUpdate
@@ -102,6 +103,29 @@ class JsonlEventLogger:
             "tracking_yaw_radians": tracking_yaw_radians,
             "reaction": reaction.motion if reaction is not None else None,
             "speech": reaction.speech if reaction is not None else None,
+        }
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as stream:
+                json.dump(record, stream, ensure_ascii=False)
+                stream.write("\n")
+
+    def write_navigation(
+        self,
+        event: str,
+        status: NavigationStatus,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "navigation",
+            "event": event,
+            "state": status.state.value,
+            "connected": status.connected,
+            "active_route_id": status.active_route_id,
+            "pause_reason": status.pause_reason,
+            "last_error": status.last_error,
+            **(details or {}),
         }
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)

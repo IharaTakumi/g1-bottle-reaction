@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import logging
 import queue
 import threading
 import time
-from typing import Callable
+from typing import Callable, Protocol
+import uuid
 
 from g1_bottle_reaction.adapters.robot import RobotAdapter
 from g1_bottle_reaction.adapters.speech import SpeechBackend
@@ -20,6 +22,68 @@ LOGGER = logging.getLogger(__name__)
 class ReactionDecision:
     accepted: bool
     reaction: Reaction | None
+    job: ReactionJob | None = None
+
+
+class ReactionLifecycleState(str, Enum):
+    ACCEPTED = "ACCEPTED"
+    STARTED = "STARTED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ReactionCompletionError(RuntimeError):
+    pass
+
+
+class ReactionJob:
+    """Observable lifecycle for one accepted reaction."""
+
+    def __init__(self, reaction: Reaction, *, accepted_at: float) -> None:
+        self.id = str(uuid.uuid4())
+        self.reaction = reaction
+        self.accepted_at = accepted_at
+        self.state = ReactionLifecycleState.ACCEPTED
+        self.error: Exception | None = None
+        self._completed = threading.Event()
+        self._lock = threading.Lock()
+
+    @property
+    def successful(self) -> bool:
+        with self._lock:
+            return self.state is ReactionLifecycleState.COMPLETED
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._completed.wait(timeout)
+
+    def _mark_started(self) -> None:
+        with self._lock:
+            self.state = ReactionLifecycleState.STARTED
+
+    def _mark_completed(self) -> None:
+        with self._lock:
+            self.state = ReactionLifecycleState.COMPLETED
+            self._completed.set()
+
+    def _mark_failed(self, error: Exception) -> None:
+        with self._lock:
+            self.error = error
+            self.state = ReactionLifecycleState.FAILED
+            self._completed.set()
+
+
+class ReactionLifecycleObserver(Protocol):
+    """Navigation-neutral observer for accepted reaction jobs."""
+
+    def on_accepted(self, job: ReactionJob) -> None: ...
+
+    def before_start(self, job: ReactionJob) -> None: ...
+
+    def on_started(self, job: ReactionJob) -> None: ...
+
+    def on_completed(self, job: ReactionJob) -> None: ...
+
+    def on_failed(self, job: ReactionJob, error: Exception) -> None: ...
 
 
 class ReactionEngine:
@@ -34,6 +98,8 @@ class ReactionEngine:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         start_worker: bool = True,
+        lifecycle_observer: ReactionLifecycleObserver | None = None,
+        motion_completion_timeout_s: float | None = None,
     ) -> None:
         self.config = config
         self.robot = robot
@@ -42,11 +108,16 @@ class ReactionEngine:
         self._clock = clock
         self._last_reaction_at = float("-inf")
         self._last_priority = 0
-        self._queue: queue.Queue[Reaction | None] = queue.Queue()
+        if motion_completion_timeout_s is not None and motion_completion_timeout_s <= 0:
+            raise ValueError("motion completion timeout must be positive")
+        self.lifecycle_observer = lifecycle_observer
+        self.motion_completion_timeout_s = motion_completion_timeout_s
+        self._queue: queue.Queue[ReactionJob | None] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._current: Reaction | None = None
         self._lock = threading.Lock()
         self._decision_lock = threading.Lock()
+        self._last_error: Exception | None = None
         if start_worker:
             self._worker = threading.Thread(
                 target=self._run, name="reaction-worker", daemon=True
@@ -57,6 +128,11 @@ class ReactionEngine:
     def current_reaction(self) -> Reaction | None:
         with self._lock:
             return self._current
+
+    @property
+    def last_error(self) -> Exception | None:
+        with self._lock:
+            return self._last_error
 
     def resolve(self, event: ReactionEvent, encounter_count: int) -> Reaction:
         try:
@@ -79,13 +155,23 @@ class ReactionEngine:
                 return ReactionDecision(accepted=False, reaction=reaction)
             self._last_reaction_at = now
             self._last_priority = reaction.priority
+        job = ReactionJob(reaction, accepted_at=now)
+        if self.lifecycle_observer is not None:
+            try:
+                self.lifecycle_observer.on_accepted(job)
+            except Exception as exc:
+                job._mark_failed(exc)
+                with self._lock:
+                    self._last_error = exc
+                LOGGER.exception("Reaction acceptance observer failed")
+                return ReactionDecision(accepted=True, reaction=reaction, job=job)
         if self._worker is None:
-            self._execute(reaction)
+            self._execute_job(job, raise_errors=True)
         else:
-            self._queue.put(reaction)
-        return ReactionDecision(accepted=True, reaction=reaction)
+            self._queue.put(job)
+        return ReactionDecision(accepted=True, reaction=reaction, job=job)
 
-    def _execute(self, reaction: Reaction) -> None:
+    def _execute_outputs(self, reaction: Reaction) -> None:
         with self._lock:
             self._current = reaction
         try:
@@ -130,18 +216,59 @@ class ReactionEngine:
             with self._lock:
                 self._current = None
 
+    def _execute_job(self, job: ReactionJob, *, raise_errors: bool) -> None:
+        observer = self.lifecycle_observer
+        try:
+            if observer is not None:
+                observer.before_start(job)
+            job._mark_started()
+            if observer is not None:
+                observer.on_started(job)
+            self._execute_outputs(job.reaction)
+            if self.motion_completion_timeout_s is not None:
+                completed = self.robot.wait_for_motion_complete(
+                    job.reaction.motion,
+                    timeout=self.motion_completion_timeout_s,
+                )
+                if not completed:
+                    raise ReactionCompletionError(
+                        f"Motion completion was not confirmed for {job.reaction.motion!r}"
+                    )
+            if observer is not None:
+                observer.on_completed(job)
+            # Signal waiters only after the lifecycle observer has completed its
+            # safety work (for example, deciding whether patrol may resume).
+            job._mark_completed()
+        except Exception as exc:
+            with self._lock:
+                self._last_error = exc
+                self._current = None
+            LOGGER.exception("Reaction '%s' failed", job.reaction.name)
+            if observer is not None:
+                try:
+                    observer.on_failed(job, exc)
+                except Exception:
+                    LOGGER.exception("Reaction failure observer failed")
+            # Failure waiters likewise wake only after fail-safe cleanup ran.
+            job._mark_failed(exc)
+            if raise_errors:
+                raise
+
     def execute(self, reaction: Reaction) -> None:
         """Execute an explicit diagnostic reaction on the shared timeline."""
 
-        self._execute(reaction)
+        self._execute_job(
+            ReactionJob(reaction, accepted_at=self._clock()),
+            raise_errors=True,
+        )
 
     def _run(self) -> None:
         while True:
-            reaction = self._queue.get()
+            job = self._queue.get()
             try:
-                if reaction is None:
+                if job is None:
                     return
-                self._execute(reaction)
+                self._execute_job(job, raise_errors=False)
             finally:
                 self._queue.task_done()
 

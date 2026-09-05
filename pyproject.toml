@@ -47,6 +47,7 @@ packages = ["src/g1_bottle_reaction"]
 "config/default.yaml" = "g1_bottle_reaction/config/default.yaml"
 "config/mujoco_motions.yaml" = "g1_bottle_reaction/config/mujoco_motions.yaml"
 "config/custom_g1_motions.yaml" = "g1_bottle_reaction/config/custom_g1_motions.yaml"
+"config/reaction_motion.yaml" = "g1_bottle_reaction/config/reaction_motion.yaml"
 
 [tool.pytest.ini_options]
 addopts = "-q"

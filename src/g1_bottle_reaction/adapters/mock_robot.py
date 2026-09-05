@@ -16,3 +16,7 @@ class MockRobotAdapter(RobotAdapter):
 
     def set_attention_yaw(self, yaw_radians: float) -> None:
         self.attention_yaws.append(yaw_radians)
+
+    def wait_for_motion_complete(self, motion: str, timeout: float | None = None) -> bool:
+        del timeout
+        return motion in self.motions

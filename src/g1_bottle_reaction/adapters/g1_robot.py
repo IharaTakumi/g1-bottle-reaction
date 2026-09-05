@@ -410,6 +410,8 @@ class G1RobotAdapter(RobotAdapter):
         self._ownership = MotionOwnership()
         self._custom_controller = custom_controller
         self._preset_completion_unconfirmed = False
+        self._last_motion_name: str | None = None
+        self._last_motion_started = False
 
     @property
     def motion_enabled(self) -> bool:
@@ -493,6 +495,8 @@ class G1RobotAdapter(RobotAdapter):
         timeline_start: float,
         timing_debug: bool = False,
     ) -> bool:
+        self._last_motion_name = motion
+        self._last_motion_started = False
         if motion == "custom_notice":
             if not self.motion_enabled or not self.custom_motion_enabled:
                 LOGGER.warning(
@@ -507,12 +511,14 @@ class G1RobotAdapter(RobotAdapter):
                 return False
             if self._custom_controller is None:
                 raise RuntimeError("G1 custom motion controller is not initialized")
-            return self._custom_controller.start(
+            started = self._custom_controller.start(
                 motion,
                 self.custom_motion_amplitude,
                 timeline_start=timeline_start,
                 timing_debug=timing_debug,
             )
+            self._last_motion_started = started
+            return started
         action = self.VERIFIED_MOTIONS.get(motion)
         if not self.motion_enabled:
             LOGGER.warning("G1 motion '%s' skipped because motion is disabled", motion)
@@ -553,12 +559,16 @@ class G1RobotAdapter(RobotAdapter):
                     release_result,
                     ArmActionSpec(ARM_RELEASE_ACTION_ID, "release arm"),
                 )
+                # A successful release cannot prove that a timed-out action
+                # reached its intended physical completion boundary.
                 self._preset_completion_unconfirmed = (
-                    unitree_result_code(release_result)
+                    self._preset_completion_unconfirmed
+                    or unitree_result_code(release_result)
                     == ARM_ACTION_RPC_TIMEOUT_CODE
                 )
         finally:
             self._ownership.release("preset")
+        self._last_motion_started = True
         return True
 
     def apply_tracking(self, command: TrackingCommand) -> None:
@@ -572,6 +582,17 @@ class G1RobotAdapter(RobotAdapter):
         if self._custom_controller is None:
             return True
         return self._custom_controller.wait(timeout)
+
+    def wait_for_motion_complete(self, motion: str, timeout: float | None = None) -> bool:
+        if motion != self._last_motion_name or not self._last_motion_started:
+            return False
+        if motion == "custom_notice":
+            return self.wait_for_custom_motion(timeout)
+        if motion in self.VERIFIED_MOTIONS:
+            # Until rt/arm/action/state is implemented, only the releasable Action
+            # has a conservative completion boundary after a successful release.
+            return not self._preset_completion_unconfirmed
+        return False
 
     def close(self) -> None:
         if self._custom_controller is not None:

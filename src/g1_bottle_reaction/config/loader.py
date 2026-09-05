@@ -276,6 +276,33 @@ class G1Config:
 
 
 @dataclass(frozen=True, slots=True)
+class NavigationConfig:
+    default_route_id: str
+    command_timeout_s: float
+    status_poll_interval_s: float
+    heartbeat_interval_s: float
+    heartbeat_timeout_s: float
+    reaction_completion_timeout_s: float
+    auto_pause_for_reaction: bool
+
+    def validate(self) -> None:
+        if not self.default_route_id.strip():
+            raise ValueError("navigation default_route_id cannot be empty")
+        if min(
+            self.command_timeout_s,
+            self.status_poll_interval_s,
+            self.heartbeat_interval_s,
+            self.heartbeat_timeout_s,
+            self.reaction_completion_timeout_s,
+        ) <= 0:
+            raise ValueError("navigation timeouts and intervals must be positive")
+        if self.heartbeat_timeout_s <= self.heartbeat_interval_s:
+            raise ValueError(
+                "navigation heartbeat_timeout_s must exceed heartbeat_interval_s"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     vision: VisionConfig
     tracking: TrackingConfig
@@ -284,6 +311,7 @@ class AppConfig:
     audio: AudioConfig
     speech: SpeechConfig
     g1: G1Config
+    navigation: NavigationConfig
     event_log: Path
     simulation_realtime_scale: float
 
@@ -379,6 +407,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         raise ValueError("speech.aivis.timeout_seconds must be positive")
     g1 = G1Config(**raw["g1"])
     g1.validate()
+    navigation = NavigationConfig(**raw["navigation"])
+    navigation.validate()
     return AppConfig(
         vision=VisionConfig(**raw["vision"]),
         tracking=tracking,
@@ -436,6 +466,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             )
         ),
         g1=g1,
+        navigation=navigation,
         event_log=Path(raw["logging"]["event_log"]),
         simulation_realtime_scale=float(raw["simulation"].get("realtime_scale", 0)),
     )
