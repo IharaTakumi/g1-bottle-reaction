@@ -1,0 +1,37 @@
+game_vision:
+  vision_preset: normal
+  fog_mode: fade
+  presets:
+    close:
+      clear_m: 1.0
+      max_m: 2.0
+    normal:
+      clear_m: 1.5
+      max_m: 2.5
+    long:
+      clear_m: 2.0
+      max_m: 3.5
+  fov:
+    enabled: true
+    scale: 0.55
+    feather: 0.25
+  display:
+    fullscreen: true
+    show_fps: true
+    mode: game
+    safety_inset_scale: 0.28
+  capture:
+    width: 640
+    height: 480
+    fps: 30
+    timeout_ms: 3000
+  transport:
+    g1_host: 192.168.123.164
+    game_port: 55558
+    safety_port: 55559
+    bind_host: 127.0.0.1
+    webp_quality: 80
+    connect_timeout_ms: 3000
+    stale_timeout_ms: 500
+  controls:
+    distance_step_m: 0.25

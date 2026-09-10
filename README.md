@@ -62,7 +62,21 @@ python -m g1_bottle_reaction --robot mock --camera 0 --speech auto
 
 `q`またはEscで終了します。`--speech auto` は日本語のWindows音声が利用できる場合に読み上げ、利用できなければconsole表示へフォールバックします。`--speech console` と `--speech mute` も選択できます。
 
-初回のカメラ実行時、Ultralyticsが `yolo11n.pt` をダウンロードする場合があります。モデル名またはローカルパスは `config/default.yaml` の `vision.model` で変更できます。自動テストとsimulationはUltralytics、モデル、Webカメラ、インターネットを使用しません。
+上記のmain applicationでは、初回のカメラ実行時にUltralyticsが `yolo11n.pt` をダウンロードする場合があります。モデル名またはローカルパスは `config/default.yaml` の `vision.model` で変更できます。自動テストとsimulationはUltralytics、モデル、Webカメラ、インターネットを使用しません。
+
+## G1 Game Vision（独立viewer）
+
+G1かくれんぼのゲーム性検証用に、既存Reaction/YOLO/robot controlから独立したRGBD viewerがあります。疑似Depthだけならカメラなしで実行できます。
+
+```powershell
+python -m g1_bottle_reaction.game_vision --source synthetic --windowed
+python -m g1_bottle_reaction.game_vision --source webcam --camera 0 --windowed
+python -m g1_bottle_reaction.game_vision --source video --video test.mp4 --loop
+```
+
+defaultは1.5mまで表示、1.5–2.5mでfade、2.5m以遠とinvalid Depthを黒にし、中央55%を完全表示するFOV maskを重ねます。Direct RealSenseではSDKのDepth-to-Color alignment後に処理します。無線 `--source g1` はPC2で処理済みのgame stream、公式 `VideoClient` のRGB-only診断は `--source g1-rgb` です。後者をgameへ黙ってfallbackせず、Depthなしではgame viewを黒にします。
+
+導入を行う前のUbuntu/PC2監査、RealSense、fullscreen・キー操作、preset、safety view、無線構成A/B比較、実機手順と `NOT VERIFIED ON REAL G1` 項目は [G1 Game Vision手順](docs/G1_GAME_VISION.md) を参照してください。
 
 ## Smartphone Stealth Game
 

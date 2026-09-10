@@ -17,7 +17,7 @@ def inspect(path):
     if not path.is_absolute():
         raise ValueError('An evidence-backed absolute path is required')
     path = path.resolve(strict=True)
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
     with os.fdopen(fd, 'rb', buffering=0) as stream:
         metadata = os.fstat(stream.fileno())
         if not stat.S_ISREG(metadata.st_mode):
