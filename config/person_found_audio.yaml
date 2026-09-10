@@ -1,0 +1,9 @@
+# Opt-in with --found-audio. No TTS synthesis or robot motion.
+# Confidence uses the existing --yolo-confidence option (default 0.25).
+found_duration: 0.3
+dropout_grace: 0.15
+audio_cooldown: 2.0
+rearm_absence: 1.0
+# User selected this existing f0e... WAV; never synthesize.
+sound: .cache/tts/f0e5a8e8bb3d40781278d8f577044bea1b63ba198655936ef908a15f3e9ccb9b.wav
+output: g1

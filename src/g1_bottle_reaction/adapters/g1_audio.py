@@ -22,7 +22,7 @@ class G1AudioOutput(AudioOutput):
         network_interface: str,
         *,
         network_address: str | None = None,
-        volume: int = 85,
+        volume: int | None = 85,
         timeout_seconds: float = 10.0,
         chunk_bytes: int = 96_000,
         chunk_delay_seconds: float = 1.0,
@@ -32,7 +32,7 @@ class G1AudioOutput(AudioOutput):
             raise ValueError(
                 "--network-interface or --network-address is required for G1 speaker output"
             )
-        if not 0 <= volume <= 100:
+        if volume is not None and not 0 <= volume <= 100:
             raise ValueError("G1 speaker volume must be between 0 and 100")
         if chunk_bytes <= 0 or chunk_delay_seconds < 0:
             raise ValueError("G1 audio chunk settings are invalid")
@@ -58,7 +58,8 @@ class G1AudioOutput(AudioOutput):
                 self.timeout_seconds,
                 self.network_address,
             )
-        ensure_unitree_success(client.SetVolume(self.volume), "SetVolume")
+        if self.volume is not None:
+            ensure_unitree_success(client.SetVolume(self.volume), "SetVolume")
         self._client = client
 
     def play_wav(self, path: Path) -> None:

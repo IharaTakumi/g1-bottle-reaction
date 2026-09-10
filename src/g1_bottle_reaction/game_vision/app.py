@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
             "g1",
             "g1-rgb",
             "synthetic",
+            "dual",
+            "usb-lan",
         ),
         default="webcam",
         help=(
@@ -56,6 +58,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--loop", action="store_true", help="loop a finite recording")
     parser.add_argument("--network-interface", help="Unitree SDK network interface")
     parser.add_argument("--network-address", help="explicit local DDS IPv4 address")
+    parser.add_argument("--usb-bind", default="127.0.0.1", help="local IPv4 for USB RTP receiver")
+    parser.add_argument("--usb-host", default="127.0.0.1", help="verified robot IPv4 for sender binding")
+    parser.add_argument("--usb-port", type=int, default=56000)
+    parser.add_argument("--usb-width", type=int, choices=(640, 1280), default=1280)
+    parser.add_argument("--usb-rotate", type=int, choices=(0, 180), default=0, help="USB display rotation in degrees")
+    parser.add_argument("--start-usb-sender", action="store_true", help="start supervised GStreamer sender over SSH")
+    parser.add_argument("--ssh-target", default="g1")
+    parser.add_argument("--ssh-control", help="optional existing SSH control socket")
+    parser.add_argument("--gst-python", default="/usr/bin/python3", help="existing system Python with GI/GStreamer")
+    parser.add_argument("--duration", type=float, help="dual/usb-lan run duration in seconds")
+    parser.add_argument("--yolo", action="store_true", help="person-only YOLO on G1 in dual viewer; never USB")
+    parser.add_argument("--yolo-model", type=Path, default=Path(__file__).resolve().parents[3] / ".runtime/models/yolo11n.pt")
+    parser.add_argument("--yolo-confidence", type=float, default=0.25)
+    parser.add_argument("--yolo-fps", type=float, default=15, help="maximum inference rate; latest frame only")
+    parser.add_argument("--found-audio", action="store_true", help="opt-in cached WAV after sustained G1 person detection")
+    parser.add_argument("--found-duration", type=float, help="sustained person duration; default from person_found_audio.yaml")
+    parser.add_argument("--detection-grace", type=float, help="brief dropout allowance in seconds")
+    parser.add_argument("--audio-cooldown", type=float, help="audio re-trigger lockout in seconds")
+    parser.add_argument("--rearm-absence", type=float, help="person must be absent this many seconds before rearming")
+    parser.add_argument("--found-sound", help="existing WAV path or random; default: configured cached WAV")
+    parser.add_argument("--found-output", choices=("g1", "pc"), help="audio output; default G1 speaker")
     parser.add_argument("--g1-stream-host", help="PC2 host publishing processed game images")
     parser.add_argument("--g1-stream-port", type=int, help="processed TeleImager ZMQ port")
     parser.add_argument(
@@ -114,6 +137,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.found_audio and (not args.yolo or args.source != "dual"):
+            raise ValueError("--found-audio requires --source dual --yolo")
+        if args.yolo and args.source != "dual":
+            raise ValueError("--yolo requires --source dual; USB inference is not supported")
+        if args.source in {"dual", "usb-lan"}:
+            from .dual import run
+            return run(args)
         config = _apply_cli(load_game_vision_config(args.config), args)
         _validate_args(args, config)
         source = _create_source(args, config)

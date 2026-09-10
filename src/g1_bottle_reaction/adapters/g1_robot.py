@@ -35,6 +35,82 @@ WINDOWS_CHANNEL_CONFIG = """<?xml version="1.0" encoding="UTF-8" ?>
 
 _CHANNEL_CONFIG_PATCH_LOCK = threading.Lock()
 
+
+def serve_remote_cached_audio():
+    """Standalone Python 3.8-compatible SSH server; existing G1 SDK, no files.
+
+    Sent as function source to G1. Only speaker APIs are exposed. The PC keeps
+    G1AudioOutput's existing WAV conversion, chunk pacing and error handling.
+    """
+    import base64
+    import contextlib
+    import json
+    import os
+    import resource
+    import sys
+    import time
+    import xml.etree.ElementTree as ET
+
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    os.environ.pop("CYCLONEDDS_URI", None)
+    channel = client = None
+    active = False
+    app = "g1_bottle_reaction"
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            import unitree_sdk2py.core.channel as channel
+            from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
+
+            original = channel.ChannelConfigHasInterface
+            root = ET.fromstring(original)
+            for parent in root.iter():
+                for child in list(parent):
+                    if child.tag == "Tracing":
+                        parent.remove(child)
+            channel.ChannelConfigHasInterface = ET.tostring(root, encoding="unicode")
+            try:
+                channel.ChannelFactoryInitialize(0, "eth0")
+            finally:
+                channel.ChannelConfigHasInterface = original
+            client = AudioClient()
+            client.SetTimeout(1.0)
+            client.Init()
+            deadline = time.monotonic() + 10
+            while True:
+                code, volume = client.GetVolume()
+                if code == 0:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("G1-local GetVolume failed: %s" % code)
+                time.sleep(.1)
+        print(json.dumps({"status": "ready", "volume": volume}), flush=True)
+        while True:
+            line = sys.stdin.readline(65537)
+            if not line:
+                break
+            if len(line) > 65536 or not line.endswith("\n"):
+                raise ValueError("oversized audio request")
+            request = json.loads(line)
+            with contextlib.redirect_stdout(sys.stderr):
+                if request["operation"] == "PlayStream":
+                    pcm = base64.b64decode(request["pcm"], validate=True)
+                    if not 0 < len(pcm) <= 16000 or len(pcm) % 2:
+                        raise ValueError("invalid PCM chunk")
+                    active = True
+                    result = client.PlayStream(app, str(request["stream_id"]), pcm)
+                elif request["operation"] == "PlayStop":
+                    result = client.PlayStop(app)
+                    active = False
+                else:
+                    raise ValueError("unsupported audio operation")
+            print(json.dumps({"status": "result", "result": result}), flush=True)
+    except Exception as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}), flush=True)
+    finally:
+        if client is not None and active:
+            with contextlib.redirect_stdout(sys.stderr):
+                client.PlayStop(app)
+
 ARM_ACTION_RPC_TIMEOUT_CODE = 3104
 ARM_RELEASE_ACTION_ID = 99
 
@@ -146,6 +222,33 @@ class UnitreeSdkRuntime:
                 "unitree_sdk2_python with VideoClient is required in the G1 environment"
             ) from exc
         return VideoClient
+
+    def load_camera_symbols(self) -> tuple[Any, Any]:
+        """Camera-only symbols with process-local, trace-free named-NIC setup.
+
+        CycloneDDS 0.10.2 config tracing can abort in do_print_uint32_bitset
+        on this Ubuntu build. Preserve explicit NIC selection; omit tracing.
+        SDK files, OS configuration and other runtime entry points are untouched.
+        """
+        channel = self._load_channel_module()
+
+        def initialize(domain: int, interface: str) -> None:
+            import xml.etree.ElementTree as ET
+
+            with _CHANNEL_CONFIG_PATCH_LOCK:
+                original = channel.ChannelConfigHasInterface
+                root = ET.fromstring(original)
+                for parent in root.iter():
+                    for child in list(parent):
+                        if child.tag == "Tracing":
+                            parent.remove(child)
+                channel.ChannelConfigHasInterface = ET.tostring(root, encoding="unicode")
+                try:
+                    channel.ChannelFactoryInitialize(domain, interface)
+                finally:
+                    channel.ChannelConfigHasInterface = original
+
+        return initialize, self._load_video_client_type()
 
     def _load_arm_action_client_type(self) -> Any:
         if self._arm_action_client_loader is not None:

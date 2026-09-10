@@ -88,3 +88,12 @@ def test_g1_audio_module_import_does_not_require_unitree_sdk() -> None:
     module = importlib.import_module("g1_bottle_reaction.adapters.g1_audio")
     assert module.G1AudioOutput is not None
 
+
+def test_g1_audio_can_preserve_existing_volume(tmp_path: Path) -> None:
+    path = tmp_path / "voice.wav"
+    _write_stereo_wav(path)
+    runtime = FakeRuntime()
+    output = G1AudioOutput("eth-test", volume=None, chunk_delay_seconds=0, runtime=runtime)
+    output.play_wav(path)
+    assert runtime.client.volume is None
+    assert runtime.client.chunks

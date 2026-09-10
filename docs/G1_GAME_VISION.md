@@ -1,5 +1,19 @@
 # G1 Game Vision
 
+内蔵RGBだけにCOCO person YOLOを追加する実験: [G1_PERSON_YOLO.md](G1_PERSON_YOLO.md)。
+明示的な `--yolo` オプションを指定したときだけ動作し、USB推論・距離推定・ロボット制御は行いません。
+
+2026-09-10追記: G1頭部の追加USBカメラをG1に挿したまま、内蔵映像と有線2画面表示できました。
+USBの180度回転対応、両映像327.3秒連続LIVEを確認済みです。
+[2画面の起動コマンド・実測結果](G1_USB_DUAL.md)を参照してください。YOLO・Depth処理はありません。
+
+2026-09-10追記: **有線RGBの実機表示は成功**。最初は独立した
+`tools/g1_camera_minimal.py` を使用してください。1920x1080、300秒、平均32.5 FPS、
+ユーザーによる追従確認済み。NIC指定時のCycloneDDS設定traceによるSIGABRTを、
+この最小viewerに限ってプロセス内で回避しています。
+[実行コマンド・実測結果・Depth調査の制約](G1_CAMERA_WIRED.md)を参照してください。
+以下のRGBD/無線実装の未検証事項は引き続き未検証です。
+
 実装状態: ハードウェア非依存コードとmock transportは完成しています。D435iをG1 PC2から同時利用できるか、PC2→UbuntuのWi-Fi到達性、実効FPS・遅延は **NOT VERIFIED ON REAL G1** です。
 
 ## 1. 目的と安全境界
