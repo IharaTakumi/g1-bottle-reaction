@@ -167,6 +167,9 @@ def validate_args(args):
         raise ValueError("--yolo is only supported for the G1 camera in --source dual")
     if not math.isfinite(args.yolo_confidence) or not 0 < args.yolo_confidence <= 1:
         raise ValueError("--yolo-confidence must be in (0, 1]")
+    if args.banana_confidence is not None and (not math.isfinite(args.banana_confidence)
+                                                or not 0 < args.banana_confidence <= 1):
+        raise ValueError("--banana-confidence must be in (0, 1]")
     if not math.isfinite(args.yolo_fps) or not 0 < args.yolo_fps <= 60:
         raise ValueError("--yolo-fps must be in (0, 60]")
     bind = ipaddress.IPv4Address(args.usb_bind)
@@ -198,7 +201,8 @@ def start_sender(args):
         raise RuntimeError("USB sender test requires the existing wired LAN route")
     remote = (ROOT / "tools/g1_usb_send.py").read_text()
     argv = ["python3", "-u", "-B", "-c", remote, "--watch-stdin", "--dest", args.usb_bind,
-            "--bind", args.usb_host, "--port", str(args.usb_port), "--width", str(args.usb_width)]
+            "--bind", args.usb_host, "--port", str(args.usb_port), "--width", str(args.usb_width),
+            "--device", args.usb_device]
     if args.duration:
         argv += ["--duration", str(math.ceil(args.duration) + 60)]
     ssh = ["ssh", "-T", "-o", "StrictHostKeyChecking=yes"]
@@ -211,15 +215,20 @@ def start_sender(args):
 
 def run(args):
     validate_args(args)
-    found_settings = None
+    found_settings = banana_settings = None
+    banana_confidence = None
+    if args.yolo:
+        from .person_yolo import load_banana_confidence
+        banana_confidence = load_banana_confidence(args, ROOT)
     if args.found_audio:
-        from .found_audio import load_settings
+        from .found_audio import load_banana_settings, load_settings
         found_settings = load_settings(args, ROOT)
+        banana_settings = load_banana_settings(ROOT, banana_confidence, found_settings.output)
     if not args.headless and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         raise RuntimeError("A desktop session is required; otherwise use --headless")
     readers = {}
     yolo = None
-    audio = gate = None
+    audio = gate = banana_gate = None
     found_label = None
     boxes = True
     detection = None
@@ -239,10 +248,13 @@ def run(args):
     first_display = None
     try:
         if found_settings:
-            from .found_audio import FoundGate, SingleAudioWorker
+            from .found_audio import FoundGate, SingleAudioWorker, select_audio_trigger
             from g1_bottle_reaction.adapters.cached_audio import G1SshAudioOutput, LinuxAplayOutput
             gate = FoundGate(found_settings.duration, found_settings.grace, found_settings.cooldown,
                              found_settings.confidence, found_settings.rearm_absence)
+            banana_gate = FoundGate(banana_settings.duration, banana_settings.grace,
+                                    banana_settings.cooldown, banana_settings.confidence,
+                                    banana_settings.rearm_absence, object_attribute="bananas")
             if found_settings.output == "g1":
                 output = G1SshAudioOutput(args.ssh_target, args.ssh_control)
             else:
@@ -251,6 +263,8 @@ def run(args):
             print(f"FOUND AUDIO: output={found_settings.output}, files={len(found_settings.sounds)}, "
                   f"duration={gate.duration}s, grace={gate.grace}s, cooldown={gate.cooldown}s, "
                   f"rearm absence={gate.rearm_absence}s; ONCE UNTIL PERSON LEAVES", flush=True)
+            print(f"BANANA AUDIO: files={len(banana_settings.sounds)}, duration={banana_gate.duration}s, "
+                  f"priority=PERSON; ONCE UNTIL BANANA LEAVES", flush=True)
         if args.source == "dual":
             cmd = [sys.executable, "-B", helper, "g1"]
             if args.network_interface:
@@ -263,7 +277,8 @@ def run(args):
         if args.yolo:
             from .person_yolo import PersonWorker, TransitionLogger, visible_detection
             yolo = PersonWorker(lambda: readers["g1"].snapshot(consume=False), args.yolo_model,
-                                args.yolo_confidence, args.yolo_fps, ROOT / ".runtime/yolo")
+                                args.yolo_confidence, banana_confidence, args.yolo_fps,
+                                ROOT / ".runtime/yolo")
             transitions = TransitionLogger()
             yolo.start()
         if args.start_usb_sender:
@@ -276,7 +291,8 @@ def run(args):
                                  cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
         print("1=G1 2=USB 3=dual f=fullscreen q/Esc=exit; local age is NOT capture-to-display latency", flush=True)
         if yolo:
-            print("y=YOLO ON/OFF b=boxes ON/OFF; G1 ONLY; NO ROBOT MOTION COMMANDS", flush=True)
+            print("y=YOLO ON/OFF b=boxes ON/OFF; PERSON+BANANA ON G1 ONLY; "
+                  "AUDIO PRIORITY=PERSON; NO ROBOT MOTION COMMANDS", flush=True)
         while True:
             now = time.monotonic()
             states = {key: r.snapshot() for key, r in readers.items()}
@@ -288,10 +304,17 @@ def run(args):
                 if message:
                     print(message, flush=True)
                 if gate:
-                    if gate.update(detection, now, audio_busy=audio.busy or bool(audio.error)):
-                        if audio.submit():
-                            print(f"FOUND TRIGGER: cooldown {gate.cooldown:.2f}s", flush=True)
-                    found_label = "AUDIO ERROR (disabled)" if audio.error else gate.label(now)
+                    trigger = select_audio_trigger(
+                        detection, now, gate, banana_gate,
+                        audio_busy=audio.busy or bool(audio.error))
+                    if trigger == "person":
+                        if audio.submit(found_settings.sounds):
+                            print(f"PERSON AUDIO TRIGGER: cooldown {gate.cooldown:.2f}s", flush=True)
+                    elif trigger == "banana":
+                        if audio.submit(banana_settings.sounds):
+                            print(f"BANANA AUDIO TRIGGER: cooldown {banana_gate.cooldown:.2f}s", flush=True)
+                    found_label = ("AUDIO ERROR (disabled)" if audio.error else
+                                   f"P {gate.compact_label(now)} | B {banana_gate.compact_label(now)}")
             live = all(s.frame is not None and not s.error and now - s.stamp <= 0.5 for s in states.values())
             if live:
                 both_since = both_since if both_since is not None else now

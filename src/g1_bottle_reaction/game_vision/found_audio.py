@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
-import random
 import threading
 import wave
 
@@ -38,16 +37,26 @@ def load_settings(args, root):
     path = pick("found_sound", "sound")
     if not path:
         raise ValueError("No default cache sound selected; use --found-sound /absolute/path.wav")
-    if str(path) == "random":
-        paths = tuple(sorted((root / ".cache/tts").glob("*.wav")))
-        if not paths:
-            raise ValueError("No existing .cache/tts/*.wav files")
-    else:
-        path = Path(path).expanduser()
-        paths = ((path if path.is_absolute() else root / path).resolve(),)
+    path = Path(path).expanduser()
+    paths = ((path if path.is_absolute() else root / path).resolve(),)
     for path in paths:
         validate_sound(path)
     return FoundSettings(confidence, duration, grace, cooldown, paths, pick("found_output", "output"), absence)
+
+
+def load_banana_settings(root, confidence, output):
+    with (root / "config/yolo_objects.yaml").open(encoding="utf-8") as stream:
+        values = yaml.safe_load(stream)
+    duration = float(values["banana_found_duration"])
+    grace = float(values["banana_dropout_grace"])
+    cooldown = float(values["banana_audio_cooldown"])
+    absence = float(values["banana_rearm_absence"])
+    if not all(math.isfinite(v) and v > 0 for v in (duration, grace, cooldown, absence)):
+        raise ValueError("banana audio timing values must be finite and positive")
+    path = Path(values["banana_sound"])
+    path = (path if path.is_absolute() else root / path).resolve()
+    validate_sound(path)
+    return FoundSettings(confidence, duration, grace, cooldown, (path,), output, absence)
 
 
 def validate_sound(path):
@@ -61,12 +70,25 @@ def validate_sound(path):
         raise ValueError(f"Cannot play existing WAV {path}: {exc}") from exc
 
 
+def select_audio_trigger(result, now, person_gate, banana_gate, *, audio_busy=False):
+    """Choose at most one reaction; a visible person always suppresses banana."""
+    if person_gate.update(result, now, audio_busy=audio_busy):
+        banana_gate.update(result, now, audio_busy=True, inhibit=True)
+        return "person"
+    if banana_gate.update(result, now, audio_busy=audio_busy,
+                          inhibit=bool(result.people)):
+        return "banana"
+    return None
+
+
 class FoundGate:
     """Fresh source timestamps only: replaying one YOLO result cannot trigger."""
-    def __init__(self, duration=.3, grace=.15, cooldown=2., confidence=.25, rearm_absence=1.):
+    def __init__(self, duration=.3, grace=.15, cooldown=2., confidence=.25,
+                 rearm_absence=1., object_attribute="people"):
         self.duration, self.grace, self.cooldown = duration, grace, cooldown
         self.confidence = confidence
         self.rearm_absence = rearm_absence
+        self.object_attribute = object_attribute
         self.waiting_clear = False
         self.clear_start = self.clear_last = None
         self.start = self.last = None
@@ -79,7 +101,7 @@ class FoundGate:
         self.start = self.last = None
         self.state = "SEARCHING"
 
-    def update(self, result, now, *, audio_busy=False):
+    def update(self, result, now, *, audio_busy=False, inhibit=False):
         if now < self.until:
             self.state = "COOLDOWN"
             return False
@@ -103,7 +125,8 @@ class FoundGate:
         self.last_sample = stamp
         if stamp <= self.eligible_after or now - stamp > self.grace:
             return False
-        positive = any(p.confidence >= self.confidence for p in result.people)
+        positive = any(item.confidence >= self.confidence
+                       for item in getattr(result, self.object_attribute))
         if self.waiting_clear:
             if positive:
                 self.clear_start = self.clear_last = None
@@ -123,7 +146,7 @@ class FoundGate:
             self.start = stamp
         self.last = stamp
         self.state = "DETECTING"
-        if stamp - self.start + 1e-9 < self.duration or audio_busy:
+        if stamp - self.start + 1e-9 < self.duration or audio_busy or inhibit:
             return False
         self.until = now + self.cooldown
         self.eligible_after = self.until
@@ -144,6 +167,17 @@ class FoundGate:
             return "FOUND - WAITING FOR CLEAR"
         return "SEARCHING"
 
+    def compact_label(self, now):
+        if self.state == "COOLDOWN":
+            return f"COOL {max(0, self.until-now):.1f}s"
+        if self.state == "DETECTING":
+            return f"DETECT {min(self.duration, max(0, self.last-self.start)):.1f}/{self.duration:.1f}s"
+        if self.waiting_clear:
+            if self.clear_start is not None:
+                return f"REARM {self.clear_last-self.clear_start:.1f}/{self.rearm_absence:.1f}s"
+            return "WAIT CLEAR"
+        return "SEARCH"
+
 
 class SingleAudioWorker:
     """One persistent thread, no playback backlog, never overlapping sounds."""
@@ -154,15 +188,20 @@ class SingleAudioWorker:
         self.condition = threading.Condition()
         self.busy = False
         self.pending = False
+        self.pending_sounds = ()
         self.stopping = False
         self.error = ""
         self.thread = threading.Thread(target=self._run, name="found-audio", daemon=True)
         self.thread.start()
 
-    def submit(self):
+    def submit(self, sounds=None):
         with self.condition:
             if self.busy or self.stopping or self.error:
                 return False
+            selected = self.sounds if sounds is None else tuple(sounds)
+            if not selected:
+                return False
+            self.pending_sounds = selected
             self.busy = self.pending = True
             self.condition.notify()
             return True
@@ -174,8 +213,9 @@ class SingleAudioWorker:
                 if self.stopping:
                     return
                 self.pending = False
+                sounds, self.pending_sounds = self.pending_sounds, ()
             try:
-                sound = random.choice(self.sounds)
+                sound = sounds[0]
                 print(f"FOUND AUDIO: {sound}", flush=True)
                 self.output.play_wav(sound)
             except Exception as exc:

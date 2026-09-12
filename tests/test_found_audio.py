@@ -9,11 +9,15 @@ import os
 
 import numpy as np
 import pytest
+import yaml
 
 from g1_bottle_reaction.game_vision.app import build_parser, main
 from g1_bottle_reaction.game_vision.dual import FrameState, compose
-from g1_bottle_reaction.game_vision.found_audio import FoundGate, SingleAudioWorker, load_settings, validate_sound
-from g1_bottle_reaction.game_vision.person_yolo import Detection, Person
+from g1_bottle_reaction.game_vision.found_audio import (
+    FoundGate, SingleAudioWorker, load_banana_settings, load_settings,
+    select_audio_trigger, validate_sound,
+)
+from g1_bottle_reaction.game_vision.person_yolo import Banana, Detection, Person
 
 
 def detection(stamp, positive=True, confidence=.8):
@@ -28,6 +32,48 @@ def test_single_result_or_single_frame_never_triggers():
     for now in (1.05, 1.1, 1.15, 1.2, 1.4, 2):
         assert not gate.update(result, now)
     assert gate.state == "SEARCHING"
+
+
+def test_banana_never_triggers_person_audio():
+    gate = FoundGate()
+    for t in (1, 1.1, 1.2, 1.3, 1.4):
+        result = Detection(stamp=t, status='RUNNING',
+                           bananas=(Banana((1, 2, 10, 20), .9),))
+        assert not gate.update(result, t)
+    assert gate.state == 'SEARCHING'
+
+
+def object_detection(stamp, *, person=False, banana=False):
+    return Detection(
+        people=(Person((1, 2, 10, 20), .9),) if person else (),
+        bananas=(Banana((2, 3, 12, 22), .9),) if banana else (),
+        stamp=stamp, status='RUNNING')
+
+
+def test_person_has_priority_when_person_and_banana_are_both_visible():
+    person_gate = FoundGate()
+    banana_gate = FoundGate(object_attribute='bananas')
+    selected = []
+    for t in (1, 1.1, 1.2, 1.3):
+        trigger = select_audio_trigger(object_detection(t, person=True, banana=True),
+                                       t, person_gate, banana_gate)
+        if trigger:
+            selected.append(trigger)
+    assert selected == ['person']
+    assert banana_gate.state == 'DETECTING'
+
+
+def test_banana_triggers_once_when_no_person_then_waits_until_clear():
+    person_gate = FoundGate()
+    banana_gate = FoundGate(object_attribute='bananas')
+    triggers = []
+    for t in (1, 1.1, 1.2, 1.3, 3.4, 3.5, 5.0):
+        trigger = select_audio_trigger(object_detection(t, banana=True),
+                                       t, person_gate, banana_gate)
+        if trigger:
+            triggers.append(trigger)
+    assert triggers == ['banana']
+    assert banana_gate.waiting_clear
 
 
 def test_confirmation_cooldown_and_fresh_reconfirmation():
@@ -140,6 +186,21 @@ def test_slow_audio_never_overlaps_and_does_not_block_submit():
     assert not worker.thread.is_alive()
 
 
+def test_worker_can_play_one_object_specific_sound():
+    played, done = [], threading.Event()
+    class Output:
+        def play_wav(self, path):
+            played.append(path)
+            done.set()
+    worker = SingleAudioWorker(Output(), [Path('person.wav')])
+    try:
+        assert worker.submit([Path('banana.wav')])
+        assert done.wait(timeout=2)
+    finally:
+        worker.close()
+    assert played == [Path('banana.wav')]
+
+
 def test_playback_failure_disables_audio_without_exception_to_gui():
     class Output:
         def play_wav(self, path):
@@ -198,13 +259,27 @@ def test_explicit_existing_wav_and_invalid_path(tmp_path):
         validate_sound(tmp_path/'missing.wav')
 
 
-def test_default_is_user_selected_f0e_wav():
+def test_default_audio_paths_are_semantic_and_separate(tmp_path):
     root = Path(__file__).resolve().parents[1]
     # Cache files are private/local; verify configuration without requiring them.
-    import yaml
     settings = yaml.safe_load((root/'config/person_found_audio.yaml').read_text())
-    assert settings['sound'] == '.cache/tts/f0e5a8e8bb3d40781278d8f577044bea1b63ba198655936ef908a15f3e9ccb9b.wav'
+    assert settings['sound'] == '.cache/tts/person/detected.wav'
     assert settings['rearm_absence'] == 1.0
+    banana_path = tmp_path/'.cache/tts/banana/detected.wav'
+    banana_path.parent.mkdir(parents=True)
+    with wave.open(str(banana_path), 'wb') as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16000)
+        stream.writeframes(b'\0\0'*160)
+    (tmp_path/'config').mkdir()
+    (tmp_path/'config/yolo_objects.yaml').write_text(yaml.safe_dump({
+        'banana_found_duration': .3, 'banana_dropout_grace': .15,
+        'banana_audio_cooldown': 2., 'banana_rearm_absence': 1.,
+        'banana_sound': '.cache/tts/banana/detected.wav'}))
+    banana = load_banana_settings(tmp_path, .25, 'g1')
+    assert banana.sounds == (banana_path.resolve(),)
+    assert banana.confidence == .25 and banana.output == 'g1'
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='G1 audio pipe helper is Linux-only')

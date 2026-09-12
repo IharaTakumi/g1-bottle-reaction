@@ -16,12 +16,13 @@ import subprocess
 import sys
 import time
 
-DEVICE = "/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0"
+DEVICE = "auto"
 
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--device", default=DEVICE)
+    p.add_argument("--device", default=DEVICE,
+                   help="stable /dev/v4l/by-id path, or auto for one non-RealSense USB camera")
     p.add_argument("--dest", required=True, type=ipaddress.IPv4Address)
     p.add_argument("--bind", required=True, type=ipaddress.IPv4Address)
     p.add_argument("--port", type=int, default=56000)
@@ -44,17 +45,39 @@ def command(args):
             "sync=false", "async=false"]
 
 
+def detect_device(requested, by_id=Path("/dev/v4l/by-id")):
+    if requested != "auto":
+        return Path(requested).resolve(strict=True)
+    candidates = sorted(
+        path for path in by_id.glob("usb-*-video-index0")
+        if "realsense" not in path.name.lower()
+    )
+    if len(candidates) != 1:
+        listed = ", ".join(str(path) for path in candidates) or "none"
+        raise RuntimeError(
+            "USB camera auto-detection requires exactly one non-RealSense "
+            "video-index0 device; found: " + listed
+        )
+    return candidates[0].resolve(strict=True)
+
+
 def main():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     args = parser().parse_args()
+    device = detect_device(args.device)
+    args.device = str(device)
     cmd = command(args)
-    device = Path(args.device).resolve(strict=True)
     sys_device = Path("/sys/class/video4linux") / device.name / "device"
     # Prevent accidental capture of the existing RealSense/videohub camera.
     parents = [sys_device.resolve()] + list(sys_device.resolve().parents)
     usb = next((p for p in parents if (p / "idVendor").exists()), None)
-    if usb is None or (usb / "idVendor").read_text().strip() != "0c45" or (usb / "idProduct").read_text().strip() != "6366":
-        raise RuntimeError("Selected node is not the verified Innomaker 0c45:6366 USB camera")
+    if usb is None:
+        raise RuntimeError("Selected video node is not a USB camera")
+    vendor = (usb / "idVendor").read_text().strip().lower()
+    product = (usb / "idProduct").read_text().strip().lower()
+    if vendor == "8086":
+        raise RuntimeError("Refusing to use the G1 RealSense as the head USB camera")
+    print("Selected USB camera:", device, "USB ID", vendor + ":" + product, flush=True)
     if not shutil.which("gst-launch-1.0"):
         raise RuntimeError("Existing GStreamer is required; do not install system packages")
     env = dict(os.environ, GST_REGISTRY="/dev/null", GST_REGISTRY_UPDATE="no")

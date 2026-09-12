@@ -1,4 +1,4 @@
-# G1 person → cached audio (debug cooldown)
+# G1 person / banana → organized cached audio
 
 **2026-09-10: 2画面＋YOLOからG1本体の音声再生に成功し、ユーザーが「聞こえます」と確認しました。**
 PC側でカメラと音声のDDSを同時使用すると3102/3104が発生しました。接続共有や取得頻度低減でも
@@ -8,6 +8,8 @@ G1の既存Python 3.8、unitree_sdk2py、cycloneddsを使用し、G1へファイ
 音量はユーザー指定で85。カメラサービス/SDK/system設定には変更を加えていません。
 
 音声は明示的に `--found-audio` を指定した場合だけ有効です。G1内蔵カメラのYOLO結果だけを使います。
+personとbananaを同時検出した場合はpersonを優先し、音声を重ねたりqueueへ溜めたりしません。
+banana音声の再生中にpersonが現れた場合は、再生を途中で切らず、終了後にpersonを判定します。
 従来のカメラreader・YOLO worker・USB表示は変更せず、動作命令・TTS生成は追加しません。
 
 ## 初期設定
@@ -28,20 +30,16 @@ YOLO停止・カメラ切断・古い結果の再利用を「人が去った」�
 
 ## 音声
 
-既存の `/home/ubuntu/dev/g1-bottle-reaction/.cache/tts/` 内に31 WAVを確認しました。
-すべてMicrosoft PCM WAV、44,100 Hz、16bit、mono、長さ0.52〜3.01秒。
-キャッシュ名はSpeechCacheのSHA256（text/speaker UUID/style/profile等）ですが、
-話者UUID/styleを含む対応表がなく、ファイル名からセリフを特定できませんでした。
-最新のユーザー指定により、既定音声は次の1ファイルに固定しました。
+2026-09-12に旧hash名WAV 31個を整理しました。使用中のperson音声とユーザー提供のbanana音声だけを残し、
+不要な旧WAV 30個を削除しました。今後は `.cache/tts/<対象>/<イベント>.wav` で追加します。
 
-`/home/ubuntu/dev/g1-bottle-reaction/.cache/tts/f0e5a8e8bb3d40781278d8f577044bea1b63ba198655936ef908a15f3e9ccb9b.wav`
+- `.cache/tts/person/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（旧f0e5...音声）
+- `.cache/tts/banana/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（banana_surprised.wav）
 
-PCM WAV、44,100 Hz、16bit、mono、1.378秒です。
+bananaも0.3秒継続検出後に1回だけ再生します。実機で短い検出抜けが見られたためbananaだけ0.30秒まで
+検出抜けを許容し、画面から1秒以上消えた後に再発火可能です。
 実際に使ったフルパスは `FOUND AUDIO: /home/.../xxxx.wav` とconsoleに出力します。
-明示的に `--found-sound random` を指定した場合のみ、以前のランダム選択も使用できます。
-
 固定音声なら `--found-sound /absolute/path.wav`。存在・非空PCM WAVを起動前に検証します。
-キャッシュを追加生成・上書きしたり、31件をまとめて試聴したりしません。
 
 ユーザーの指定により、既定出力は**G1本体スピーカー**です。
 既存 `AudioOutput.play_wav()` と `G1AudioOutput` の変換・送信間隔・終了処理を再利用します。
@@ -72,7 +70,7 @@ PCの既存 `/usr/bin/aplay` → ALSA default（このPCではPipeWire）へ出�
 既存viewerと二重起動せず、先にqで終了してください。
 
 ```bash
-/home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 192.168.123.200 --usb-host 192.168.123.164 --start-usb-sender --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/control --usb-rotate 180 --windowed --yolo --yolo-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0
+/home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 192.168.123.200 --usb-host 192.168.123.164 --start-usb-sender --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/control --usb-rotate 180 --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0
 ```
 
 キー: y=YOLO切替、b=枠切替、1/2/3=表示切替、f=fullscreen、q/Esc=終了。r操作は不要です。
@@ -82,7 +80,7 @@ game_vision/app.py、game_vision/dual.py、tests/test_found_audio.py、この文
 G1出力対応: adapters/g1_robot.py（音声限定SSH helper）、adapters/g1_audio.py、tests/test_g1_audio.py、tests/test_g1_cached_ssh.py。
 tools/g1_cached_sound.pyは単独切り分け用で、通常の2画面起動では使いません。
 
-自動テスト: 357 passed / 1 skipped（6.39秒、表示欄分離後）。mockの--simulateも完走。新規依存の追加なし。
+自動テスト: 371 passed / 1 skipped。mockの--simulateも完走。新規依存の追加なし。
 再発火抑制の修正後、ユーザーが「うまくいきました」と実機動作を確認しました。
 G1-local SDK経由の統合試験中もcamera約41 FPS / USB29.5 FPS / YOLO14.6 FPSを維持。
 音声APIの成功と、実際の聞こえ方は別に確認します。

@@ -17,13 +17,13 @@ Ubuntu PC: enp129s0=192.168.123.200/24。
 
 | 項目 | 結果 |
 | --- | --- |
-| 追加USBカメラ | Innomaker-U20CAM-1080p-S1 / USB ID 0c45:6366 |
+| 追加USBカメラ | SunplusIT Full HD webcam / USB ID 1bcf:2283（2026-09-12交換） |
 | USB接続先 | G1の上記host、sysfs usb1/1-3 |
-| stable device | /dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0 |
+| stable device | /dev/v4l/by-id/usb-SunplusIT_Inc_Full_HD_webcam_J20230323V1-video-index0 |
 | 当日のvideo node | /dev/video6。video7は同カメラの別nodeで、captureには使用しない |
 | 取得方法 | 既存GStreamer 1.16.3のv4l2src |
 | 検証済み形式 | image/jpeg (MJPEG)、1280x720@30指定 / 640x480@30指定、各60フレーム取得成功 |
-| 採用 | 1280x720。USB単独受信301フレーム、平均29.6 FPS、RTP loss=0 |
+| 採用 | MJPEG 1280x720@30指定。新カメラの実測受信は約16.8 FPS、RTP欠損0 |
 | 内蔵カメラ | RealSense D435i + 既存videohub_pc4（起動・停止・設定変更なし） |
 | 内蔵取得 | 同じ公式VideoClient / G1CameraSource / trace-free CameraRuntime |
 
@@ -79,6 +79,10 @@ ControlMasterは単なる一時認証済み接続で、パスワードをファ�
 現在値を確認してからIPv4を指定してください。自動sender開始前にdirect routeと送信元IPv4を確認し、
 既存有線経路と一致しなければ起動を拒否します。ネットワーク設定は変更しません。
 
+`--usb-device auto`（既定）は `/dev/v4l/by-id/` の `video-index0` からRealSenseを除外します。
+外付けUSBカメラがちょうど1台なら自動選択し、0台または複数なら誤選択を避けて起動を拒否します。
+複数台の場合は `--usb-device /dev/v4l/by-id/XXXX-video-index0` で明示してください。
+
 キー: `1`=G1のみ、`2`=USBのみ、`3`=2画面、`f`=fullscreen切替、`q`/Esc=終了。
 `1`/`2`でも両方のreaderは動き続け、切替時に古い映像を再生しません。
 `--usb-rotate 180`はUSBだけに適用し、HUDの文字やG1映像は回転しません。
@@ -92,7 +96,7 @@ G1だけなら引き続き`tools/g1_camera_minimal.py`を使えます。
 自動senderと同時に起動しないでください。G1にSSHした端末で:
 
 ```bash
-GST_REGISTRY=/dev/null GST_REGISTRY_UPDATE=no gst-launch-1.0 -e v4l2src device=/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0 do-timestamp=true ! image/jpeg,width=1280,height=720,framerate=30/1 ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! jpegparse ! rtpjpegpay pt=26 mtu=1200 ! udpsink host=192.168.123.200 bind-address=192.168.123.164 port=56000 sync=false async=false
+GST_REGISTRY=/dev/null GST_REGISTRY_UPDATE=no gst-launch-1.0 -e v4l2src device=/dev/v4l/by-id/usb-SunplusIT_Inc_Full_HD_webcam_J20230323V1-video-index0 do-timestamp=true ! image/jpeg,width=1280,height=720,framerate=30/1 ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! jpegparse ! rtpjpegpay pt=26 mtu=1200 ! udpsink host=192.168.123.200 bind-address=192.168.123.164 port=56000 sync=false async=false
 ```
 
 終了はその端末でCtrl+C。Ubuntu側コマンドは`--start-usb-sender`を省略します。

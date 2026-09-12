@@ -1,7 +1,13 @@
-# G1内蔵カメラ限定・COCO person実験
+# G1内蔵カメラ限定・COCO person + banana実験
+
+2026-09-12にCOCO `banana`（class 46）を追加しました。person（class 0）のconfidence 0.25は維持し、
+bananaのconfidenceはユーザーの最新指定によりpersonと同じ0.25です。`config/yolo_objects.yaml`で既定値を管理し、
+`--banana-confidence`で一時変更できます。bananaは枠・confidence・console遷移を表示します。
+2026-09-12にユーザー提供音声を追加し、person優先でbanana検出音声も1回だけ再生します。
+bananaによるG1動作やゲームイベントはまだ追加していません。
 
 実装と実機人物検出を確認済み（2026-09-10）。距離・身体部位別の系統的な検出可否は未測定です。
-USBには推論しません。ロボット制御、音、距離推定、ゲーム判定、追跡はありません。
+USBには推論しません。ロボット制御、距離推定、ゲーム判定、追跡は追加していません。
 
 ## 構成
 
@@ -11,7 +17,8 @@ camera取得・GUIは推論を待ちません。native crashも別process内に�
 500ms以上古い結果やカメラLOST時には枠と検出判定を無効化（STALE）します。
 枠は過去の推論frame由来で、最新映像と厳密同期していません。追跡・予測補間はしません。
 
-モデル: COCO pretrained YOLO11n、imgsz=640、person class=0、confidence=.25、推論上限15 FPS。
+モデル: COCO pretrained YOLO11n、imgsz=640、person class=0、banana class=46、
+各confidence=.25、推論上限15 FPS。
 G1取得は1920x1080のまま、従来のローカルpipe画像960x540から推論します。
 CUDA warmup失敗時だけCPU fallback。モデルは事前配置が必要で、viewer内では自動downloadしません。
 

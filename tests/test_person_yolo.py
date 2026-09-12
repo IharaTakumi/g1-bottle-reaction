@@ -9,7 +9,8 @@ import pytest
 from g1_bottle_reaction.game_vision.app import build_parser, main
 from g1_bottle_reaction.game_vision.dual import FrameState, compose, validate_args
 from g1_bottle_reaction.game_vision.person_yolo import (
-    Detection, Person, PersonWorker, TransitionLogger, filter_people, visible_detection,
+    Banana, Detection, Person, PersonWorker, TransitionLogger, filter_bananas,
+    filter_people, load_banana_confidence, visible_detection,
 )
 
 
@@ -22,10 +23,30 @@ def test_person_and_confidence_filtering_multiple():
     assert filter_people([], .25) == ()
 
 
+def test_banana_uses_configured_confidence_without_becoming_person():
+    rows = [[1, 2, 30, 40, .24, 46], [4, 5, 60, 70, .25, 46],
+            [8, 9, 80, 90, .9, 0], [1, 2, 30, 40, float('nan'), 46]]
+    bananas = filter_bananas(rows, .25)
+    assert len(bananas) == 1 and bananas[0].confidence == .25
+    assert len(filter_people(rows, .25)) == 1
+
+
+def test_banana_confidence_config_and_override():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    args = build_parser().parse_args(['--source', 'dual'])
+    assert load_banana_confidence(args, root) == .25
+    args = build_parser().parse_args(['--source', 'dual', '--banana-confidence', '.42'])
+    assert load_banana_confidence(args, root) == .42
+
+
 def test_stale_results_and_lost_camera_clear_detection():
-    result = Detection((Person((1, 2, 10, 20), .6),), stamp=10, status="RUNNING")
+    result = Detection((Person((1, 2, 10, 20), .6),), stamp=10, status="RUNNING",
+                       bananas=(Banana((2, 3, 8, 9), .7),))
     assert visible_detection(result, True, 10.2).people
+    assert visible_detection(result, True, 10.2).bananas
     assert not visible_detection(result, True, 10.6).people
+    assert not visible_detection(result, True, 10.6).bananas
     assert visible_detection(result, False, 10.1).status == "STALE"
 
 
@@ -65,6 +86,15 @@ def test_box_coordinates_follow_camera_viewport():
     assert tuple(out[78 + 200, 200]) == (0, 255, 255)
 
 
+def test_banana_box_has_distinct_color():
+    frame = np.zeros((360, 640, 3), np.uint8)
+    state = FrameState(frame=frame, stamp=10, error='')
+    result = Detection(stamp=10, shape=(360, 640), status='RUNNING',
+                       bananas=(Banana((100, 40, 300, 200), .8),))
+    out = compose({'g1': state}, 'dual', 10.1, detection=result)
+    assert tuple(out[78 + 200, 200]) == (255, 80, 255)
+
+
 def test_transition_logs_only_changes_not_every_confidence():
     logger = TransitionLogger()
     none = Detection(status="RUNNING")
@@ -76,9 +106,20 @@ def test_transition_logs_only_changes_not_every_confidence():
     assert logger.update(none) is None
 
 
+def test_banana_transition_logs_without_person_event():
+    logger = TransitionLogger()
+    none = Detection(status='RUNNING')
+    banana = Detection(status='RUNNING', bananas=(Banana((1, 2, 10, 20), .6),))
+    assert logger.update(none) is None
+    assert 'BANANA DETECTED' in logger.update(banana)
+    assert logger.update(banana) is None
+    assert 'BANANA LOST' in logger.update(none)
+
+
 @pytest.mark.parametrize('args', [ ['--yolo-confidence', 'nan'], ['--yolo-confidence', '0'],
                                   ['--yolo-confidence', '1.1'], ['--yolo-fps', '0'],
-                                  ['--yolo-fps', 'inf'] ])
+                                  ['--yolo-fps', 'inf'], ['--banana-confidence', '0'],
+                                  ['--banana-confidence', 'nan'], ['--banana-confidence', '1.1'] ])
 def test_invalid_yolo_cli(args):
     with pytest.raises(ValueError):
         validate_args(build_parser().parse_args(['--source', 'dual'] + args))

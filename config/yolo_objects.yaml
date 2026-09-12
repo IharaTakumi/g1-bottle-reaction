@@ -1,0 +1,8 @@
+# COCO object thresholds for the G1 built-in camera viewer.
+# Person keeps the existing --yolo-confidence default (0.25).
+banana_confidence: 0.25
+banana_found_duration: 0.3
+banana_dropout_grace: 0.30
+banana_audio_cooldown: 2.0
+banana_rearm_absence: 1.0
+banana_sound: .cache/tts/banana/detected.wav

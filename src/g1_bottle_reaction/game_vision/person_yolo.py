@@ -1,4 +1,4 @@
-"""Optional person-only experiment. One in-flight frame; isolated inference process.
+"""Optional person/banana detection. One in-flight frame; isolated inference process.
 
 No camera, robot, motion, audio, tracking, or distance APIs are used here.
 """
@@ -14,10 +14,17 @@ import threading
 import time
 
 import cv2
+import yaml
 
 
 @dataclass(frozen=True)
 class Person:
+    box: tuple[float, float, float, float]
+    confidence: float
+
+
+@dataclass(frozen=True)
+class Banana:
     box: tuple[float, float, float, float]
     confidence: float
 
@@ -30,6 +37,7 @@ class Detection:
     inference_ms: float = 0
     fps: float = 0
     status: str = "STARTING"
+    bananas: tuple[Banana, ...] = ()
 
 
 def filter_people(rows, confidence):
@@ -39,6 +47,26 @@ def filter_people(rows, confidence):
                  for row in rows if len(row) == 6 and all(math.isfinite(float(v)) for v in row)
                  and row[5] == 0 and row[4] >= confidence
                  and row[2] > row[0] and row[3] > row[1])
+
+
+def filter_bananas(rows, confidence):
+    """Defensively filter x1,y1,x2,y2,confidence,class rows to COCO banana."""
+    import math
+    return tuple(Banana(tuple(float(v) for v in row[:4]), float(row[4]))
+                 for row in rows if len(row) == 6 and all(math.isfinite(float(v)) for v in row)
+                 and row[5] == 46 and row[4] >= confidence
+                 and row[2] > row[0] and row[3] > row[1])
+
+
+def load_banana_confidence(args, root):
+    with (root / "config/yolo_objects.yaml").open(encoding="utf-8") as stream:
+        configured = yaml.safe_load(stream)["banana_confidence"]
+    value = configured if args.banana_confidence is None else args.banana_confidence
+    value = float(value)
+    import math
+    if not math.isfinite(value) or not 0 < value <= 1:
+        raise ValueError("--banana-confidence must be in (0, 1]")
+    return value
 
 
 def inference_process(connection, options):
@@ -63,10 +91,11 @@ def inference_process(connection, options):
         if not model_path.is_file():
             raise FileNotFoundError(f"Download the trusted COCO model first: {model_path}")
         model = YOLO(str(model_path))
-        if model.names.get(0) != "person":
-            raise ValueError("Expected COCO class 0 = person")
+        if model.names.get(0) != "person" or model.names.get(46) != "banana":
+            raise ValueError("Expected COCO classes 0=person and 46=banana")
         device = "0" if torch.cuda.is_available() else "cpu"
-        predict_args = dict(conf=options["confidence"], classes=[0], imgsz=640,
+        predict_args = dict(conf=min(options["confidence"], options["banana_confidence"]),
+                            classes=[0, 46], imgsz=640,
                             verbose=False, save=False, max_det=30)
         dummy = np.zeros((540, 960, 3), np.uint8)
         try:
@@ -79,7 +108,8 @@ def inference_process(connection, options):
             model = YOLO(str(model_path))
             model.predict(dummy, device=device, **predict_args)
         print(f"YOLO device: {'CUDA / ' + torch.cuda.get_device_name(0) if device == '0' else 'CPU'}", flush=True)
-        print(f"Model: {model_path}; confidence={options['confidence']}; classes=[0] person", flush=True)
+        print(f"Model: {model_path}; person confidence={options['confidence']}; "
+              f"banana confidence={options['banana_confidence']}; classes=[0,46]", flush=True)
         connection.send(("ready", device))
         while True:
             frame = connection.recv()
@@ -101,10 +131,11 @@ def inference_process(connection, options):
 
 
 class PersonWorker:
-    def __init__(self, source, model, confidence=.25, max_fps=15, runtime=None,
+    def __init__(self, source, model, confidence=.25, banana_confidence=.25, max_fps=15, runtime=None,
                  target=inference_process):
         self.source = source
         self.options = dict(model=str(model), confidence=confidence,
+                            banana_confidence=banana_confidence,
                             runtime=str(runtime or Path(model).parent / ".runtime"))
         self.interval = 1 / max_fps
         self.target = target
@@ -169,8 +200,10 @@ class PersonWorker:
                 now = time.monotonic()
                 stamps.append(now)
                 fps = (len(stamps)-1)/(stamps[-1]-stamps[0]) if len(stamps) > 1 else 0
-                result = Detection(filter_people(response[1], self.options["confidence"]),
-                                   source.stamp, source.frame.shape[:2], response[2], fps, "RUNNING")
+                result = Detection(people=filter_people(response[1], self.options["confidence"]),
+                                   stamp=source.stamp, shape=source.frame.shape[:2],
+                                   inference_ms=response[2], fps=fps, status="RUNNING",
+                                   bananas=filter_bananas(response[1], self.options["banana_confidence"]))
                 self.count += 1
                 self.total_ms += response[2]
                 self.first = now if self.first is None else self.first
@@ -221,7 +254,7 @@ def visible_detection(result, camera_live, now, max_age=.5):
     if result.status != "RUNNING":
         return result
     if not camera_live or now - result.stamp > max_age:
-        return replace(result, people=(), status="STALE")
+        return replace(result, people=(), bananas=(), status="STALE")
     return result
 
 
@@ -230,17 +263,24 @@ class TransitionLogger:
         self.previous = None
 
     def update(self, result):
-        state = ("DETECTED" if result.people else "NONE") if result.status == "RUNNING" else result.status
+        state = (result.status, bool(result.people), bool(result.bananas))
         if state == self.previous:
             return None
         old, self.previous = self.previous, state
         stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        if state == "DETECTED":
+        messages = []
+        old_status, old_person, old_banana = old or (None, False, False)
+        if result.status == "RUNNING" and result.people and not old_person:
             best = max(result.people, key=lambda p: p.confidence)
-            return f"[{stamp}] PERSON DETECTED count={len(result.people)} conf={best.confidence:.2f} bbox={best.box}"
-        if old == "DETECTED":
-            return f"[{stamp}] PERSON LOST reason={state}"
-        return None
+            messages.append(f"PERSON DETECTED count={len(result.people)} conf={best.confidence:.2f} bbox={best.box}")
+        elif old_person and not result.people:
+            messages.append(f"PERSON LOST reason={result.status if result.status != 'RUNNING' else 'NONE'}")
+        if result.status == "RUNNING" and result.bananas and not old_banana:
+            best = max(result.bananas, key=lambda item: item.confidence)
+            messages.append(f"BANANA DETECTED count={len(result.bananas)} conf={best.confidence:.2f} bbox={best.box}")
+        elif old_banana and not result.bananas:
+            messages.append(f"BANANA LOST reason={result.status if result.status != 'RUNNING' else 'NONE'}")
+        return f"[{stamp}] " + " | ".join(messages) if messages else None
 
 
 def draw_detection(panel, result, boxes=True, *, info_panel=None):
@@ -260,13 +300,23 @@ def draw_detection(panel, result, boxes=True, *, info_panel=None):
             cv2.rectangle(panel, start, end, (0, 255, 255), 2)
             cv2.putText(panel, f"PERSON {person.confidence:.2f}", (start[0], max(18, start[1]-6)),
                         cv2.FONT_HERSHEY_SIMPLEX, .6, (0, 255, 255), 2)
+        for banana in result.bananas:
+            x1, y1, x2, y2 = banana.box
+            start = (max(0, min(w-1, round(x1*scale+ox))), max(0, min(h-1, round(y1*scale+oy))))
+            end = (max(0, min(w-1, round(x2*scale+ox))), max(0, min(h-1, round(y2*scale+oy))))
+            cv2.rectangle(panel, start, end, (255, 80, 255), 2)
+            cv2.putText(panel, f"BANANA {banana.confidence:.2f}", (start[0], max(18, start[1]-6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, .6, (255, 80, 255), 2)
     cv2.rectangle(info, (0, 0), (info.shape[1], 75), (20, 20, 20), -1)
-    detected = result.status == "RUNNING" and bool(result.people)
-    title = "PERSON DETECTED" if detected else ("PERSON: NONE" if result.status == "RUNNING" else "YOLO: " + result.status)
+    detected = result.status == "RUNNING" and bool(result.people or result.bananas)
+    title = (("PERSON: YES" if result.people else "PERSON: NONE") + " | " +
+             ("BANANA: YES" if result.bananas else "BANANA: NONE")
+             if result.status == "RUNNING" else "YOLO: " + result.status)
     cv2.putText(info, title, (12, 23), cv2.FONT_HERSHEY_SIMPLEX, .7,
                 (0, 255, 255) if detected else (220, 220, 220), 2)
-    best = max((p.confidence for p in result.people), default=0)
-    cv2.putText(info, f"YOLO: ON | count: {len(result.people)} | best conf: {best:.2f}", (12, 46),
+    person_best = max((p.confidence for p in result.people), default=0)
+    banana_best = max((item.confidence for item in result.bananas), default=0)
+    cv2.putText(info, f"person {len(result.people)}/{person_best:.2f} | banana {len(result.bananas)}/{banana_best:.2f}", (12, 46),
                 cv2.FONT_HERSHEY_SIMPLEX, .5, (220, 220, 220), 1)
     cv2.putText(info, f"inference: {result.inference_ms:.1f} ms | YOLO FPS: {result.fps:.1f}", (12, 68),
                 cv2.FONT_HERSHEY_SIMPLEX, .5, (220, 220, 220), 1)

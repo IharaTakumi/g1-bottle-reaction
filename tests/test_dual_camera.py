@@ -20,6 +20,7 @@ def test_dual_cli_and_rotation():
     validate_args(args)
     assert args.usb_rotate == 180 and args.fullscreen is False
     assert args.usb_port == 56000
+    assert args.usb_device == "auto"
 
 
 @pytest.mark.parametrize("arguments", [
