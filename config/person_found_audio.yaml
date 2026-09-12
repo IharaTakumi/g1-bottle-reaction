@@ -4,6 +4,6 @@ found_duration: 0.3
 dropout_grace: 0.15
 audio_cooldown: 2.0
 rearm_absence: 1.0
-# Semantic path for the existing person-found WAV; never synthesize.
-sound: .cache/tts/person/detected.wav
+# Version-controlled person-found reaction; never synthesize at runtime.
+sound: assets/audio/reactions/person/detected.wav
 output: g1

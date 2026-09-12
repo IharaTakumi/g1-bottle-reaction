@@ -261,11 +261,11 @@ def test_explicit_existing_wav_and_invalid_path(tmp_path):
 
 def test_default_audio_paths_are_semantic_and_separate(tmp_path):
     root = Path(__file__).resolve().parents[1]
-    # Cache files are private/local; verify configuration without requiring them.
+    # Reaction assets are version-controlled and separated by detected object.
     settings = yaml.safe_load((root/'config/person_found_audio.yaml').read_text())
-    assert settings['sound'] == '.cache/tts/person/detected.wav'
+    assert settings['sound'] == 'assets/audio/reactions/person/detected.wav'
     assert settings['rearm_absence'] == 1.0
-    banana_path = tmp_path/'.cache/tts/banana/detected.wav'
+    banana_path = tmp_path/'assets/audio/reactions/banana/detected.wav'
     banana_path.parent.mkdir(parents=True)
     with wave.open(str(banana_path), 'wb') as stream:
         stream.setnchannels(1)
@@ -276,7 +276,7 @@ def test_default_audio_paths_are_semantic_and_separate(tmp_path):
     (tmp_path/'config/yolo_objects.yaml').write_text(yaml.safe_dump({
         'banana_found_duration': .3, 'banana_dropout_grace': .15,
         'banana_audio_cooldown': 2., 'banana_rearm_absence': 1.,
-        'banana_sound': '.cache/tts/banana/detected.wav'}))
+        'banana_sound': 'assets/audio/reactions/banana/detected.wav'}))
     banana = load_banana_settings(tmp_path, .25, 'g1')
     assert banana.sounds == (banana_path.resolve(),)
     assert banana.confidence == .25 and banana.output == 'g1'

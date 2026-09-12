@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--banana-confidence", type=float,
                         help="banana threshold; default from config/yolo_objects.yaml")
     parser.add_argument("--yolo-fps", type=float, default=15, help="maximum inference rate; latest frame only")
-    parser.add_argument("--found-audio", action="store_true", help="opt-in cached WAV after sustained G1 person detection")
+    parser.add_argument("--found-audio", action="store_true", help="opt-in reaction WAV after sustained G1 object detection")
     parser.add_argument("--found-duration", type=float, help="sustained person duration; default from person_found_audio.yaml")
     parser.add_argument("--detection-grace", type=float, help="brief dropout allowance in seconds")
     parser.add_argument("--audio-cooldown", type=float, help="audio re-trigger lockout in seconds")

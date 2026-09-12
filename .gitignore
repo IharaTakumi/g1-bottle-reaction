@@ -33,6 +33,7 @@ logs/
 debug/
 recordings/
 *.wav
+!assets/audio/reactions/*/*.wav
 *.mp4
 
 # TTS cache

@@ -36,7 +36,7 @@ def load_settings(args, root):
         raise ValueError("found duration, dropout grace and audio cooldown must be finite and positive")
     path = pick("found_sound", "sound")
     if not path:
-        raise ValueError("No default cache sound selected; use --found-sound /absolute/path.wav")
+        raise ValueError("No default reaction sound selected; use --found-sound /absolute/path.wav")
     path = Path(path).expanduser()
     paths = ((path if path.is_absolute() else root / path).resolve(),)
     for path in paths:

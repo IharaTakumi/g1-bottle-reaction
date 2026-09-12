@@ -31,10 +31,11 @@ YOLO停止・カメラ切断・古い結果の再利用を「人が去った」�
 ## 音声
 
 2026-09-12に旧hash名WAV 31個を整理しました。使用中のperson音声とユーザー提供のbanana音声だけを残し、
-不要な旧WAV 30個を削除しました。今後は `.cache/tts/<対象>/<イベント>.wav` で追加します。
+不要な旧WAV 30個を削除しました。今後は `assets/audio/reactions/<対象>/<イベント>.wav` で追加します。
+この2ファイルはGit管理対象で、cloneした環境でもそのまま利用できます。
 
-- `.cache/tts/person/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（旧f0e5...音声）
-- `.cache/tts/banana/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（banana_surprised.wav）
+- `assets/audio/reactions/person/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（旧f0e5...音声）
+- `assets/audio/reactions/banana/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（banana_surprised.wav）
 
 bananaも0.3秒継続検出後に1回だけ再生します。実機で短い検出抜けが見られたためbananaだけ0.30秒まで
 検出抜けを許容し、画面から1秒以上消えた後に再発火可能です。
@@ -89,6 +90,6 @@ G1-local SDK経由の統合試験中もcamera約41 FPS / USB29.5 FPS / YOLO14.6 
 
 カメラ画像は上部のカメラ情報欄・下部のYOLO/音声状態欄と分離しています。
 アスペクト比を保って画像全体を表示し、黒い情報帯で画角を覆いません。検出枠は画像領域に合わせて描画します。
-Gitには音声キャッシュ、モデル、venv、SDK checkout、一時SSH接続や認証情報を含めません。
-別PCでは既存のPCM WAVを用意して `--found-sound /absolute/path.wav` で指定してください。
+Gitには上記2つのreaction WAVを含めます。AivisSpeechの生成キャッシュ、モデル、venv、SDK checkout、
+一時SSH接続や認証情報は含めません。別PCでもclone後は既定音声をそのまま利用できます。
 G1再起動後は一時SSH接続とUSB送信が終了するため、SSH再認証後にviewerを起動し直す必要があります。
