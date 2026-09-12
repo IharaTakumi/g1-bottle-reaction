@@ -23,7 +23,10 @@ MAPPING = 'rt/unitree/slam_mapping/odom'
 RELOCATION = 'rt/unitree/slam_relocation/odom'
 INFO = 'rt/slam_info'
 KEY_INFO = 'rt/slam_key_info'
-IDS = {'start': 1801, 'save': 1802, 'relocate': 1804}
+STATIC_ZERO = 'relocate-static-zero'
+IDS = {'start': 1801, 'save': 1802, 'relocate': 1804, STATIC_ZERO: 1804}
+ZERO_POSE = {'x': 0.0, 'y': 0.0, 'z': 0.0,
+             'q_x': 0.0, 'q_y': 0.0, 'q_z': 0.0, 'q_w': 1.0}
 KEYS = ('x', 'y', 'z', 'q_x', 'q_y', 'q_z', 'q_w')
 
 
@@ -152,7 +155,7 @@ def completed(session, action):
     return result
 
 
-def prepare(session, action, stationary=False, accept_seed=False):
+def prepare(session, action, stationary=False, accept_seed=False, accept_static_zero=False):
     meta = read(session / 'session.json')
     policy = meta['policy']
     if policy['interface'] != 'eth0':
@@ -162,7 +165,9 @@ def prepare(session, action, stationary=False, accept_seed=False):
     # No user-chosen filenames or reused test1.pcd. The UUID path is fixed at init.
     if meta['address'] != '/home/unitree/' + session.name + '.pcd':
         raise ValueError('Map path differs from this session')
-    if (session / (action + '.attempt.json')).exists():
+    attempted_actions = (('relocate', STATIC_ZERO) if action in ('relocate', STATIC_ZERO)
+                         else (action,))
+    if any((session / (name + '.attempt.json')).exists() for name in attempted_actions):
         raise ValueError('Operation already attempted; no automatic or repeated call allowed')
     data = snapshot(session, policy)
     parameter = {'data': {}}
@@ -176,7 +181,7 @@ def prepare(session, action, stationary=False, accept_seed=False):
         if action == 'save':
             started = completed(session, 'start')
             seed = stable_pose(data['mapping'], started['finished_ns'], time.monotonic_ns(), policy)
-        else:
+        elif action == 'relocate':
             completed(session, 'save')
             if not accept_seed:
                 raise ValueError('--accept-mapping-pose-seed is required; see pose contract documentation')
@@ -186,13 +191,22 @@ def prepare(session, action, stationary=False, accept_seed=False):
                 raise ValueError('Frozen pose is too old; relocation not sent')
             pose_values(seed['pose'], policy)
             parameter['data'].update(seed['pose'])
+        else:
+            completed(session, 'save')
+            if not accept_static_zero:
+                raise ValueError('--accept-static-same-pose-zero is required for this dedicated test')
+            seed = {'pose': dict(ZERO_POSE), 'sample': None,
+                    'contract': 'Unitree example origin pose; static same-pose test only'}
+            parameter['data'].update(ZERO_POSE)
     return meta, parameter, seed
 
 
-def command(session, action, execute, enable, stationary=False, accept_seed=False, factory=None):
+def command(session, action, execute, enable, stationary=False, accept_seed=False,
+            accept_static_zero=False, factory=None):
     if execute and not enable:
         raise ValueError('--execute also requires --enable-real-robot')
-    meta, parameter, seed = prepare(session, action, stationary, accept_seed)
+    meta, parameter, seed = prepare(session, action, stationary, accept_seed,
+                                    accept_static_zero)
     print(json.dumps({'api_id': IDS[action], 'parameter': parameter, 'preview': not execute}, indent=2))
     if not execute:
         return 0
@@ -202,7 +216,8 @@ def command(session, action, execute, enable, stationary=False, accept_seed=Fals
     import fcntl
     with (ROOT / '.runtime/g1-slam-command.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        meta, parameter, seed = prepare(session, action, stationary, accept_seed)
+        meta, parameter, seed = prepare(session, action, stationary, accept_seed,
+                                        accept_static_zero)
         # Persist intent BEFORE any SDK construction, including uncertain failure/crash.
         attempt = {'api_id': IDS[action], 'parameter': parameter, 'seed': seed,
                    'created_ns': time.monotonic_ns(), 'session_id': session.name}
@@ -332,12 +347,14 @@ def check(session):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=['init', 'record', 'start', 'save', 'relocate', 'check'])
+    p.add_argument('action', choices=['init', 'record', 'start', 'save', 'relocate',
+                                      STATIC_ZERO, 'check'])
     p.add_argument('--session', type=Path)
     p.add_argument('--execute', action='store_true', help='Send exactly one RPC (otherwise preview)')
     p.add_argument('--enable-real-robot', action='store_true')
     p.add_argument('--confirm-stationary', action='store_true')
     p.add_argument('--accept-mapping-pose-seed', action='store_true')
+    p.add_argument('--accept-static-same-pose-zero', action='store_true')
     args = p.parse_args()
     try:
         if args.action == 'init':
@@ -350,7 +367,8 @@ def main():
             check(args.session.resolve())
         else:
             return command(args.session.resolve(), args.action, args.execute, args.enable_real_robot,
-                           args.confirm_stationary, args.accept_mapping_pose_seed)
+                           args.confirm_stationary, args.accept_mapping_pose_seed,
+                           args.accept_static_same_pose_zero)
         return 0
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print('REFUSED:', exc)

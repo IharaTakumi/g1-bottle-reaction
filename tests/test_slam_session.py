@@ -121,6 +121,30 @@ def test_save_requires_successful_start_and_stationary_confirmation(setup):
         slam.prepare(session, 'save', stationary=True)
 
 
+@pytest.mark.skipif(__import__('sys').platform == 'win32', reason='Ubuntu command lock uses flock')
+def test_static_zero_relocation_is_explicit_single_1804_and_mutually_exclusive(setup):
+    session, _, _, now = setup
+    slam.write(session / 'save.result.json', {'rpc_code': 0,
+        'response': {'succeed': True, 'errorCode': 0}, 'finished_ns': now})
+    with pytest.raises(ValueError, match='accept-static-same-pose-zero'):
+        slam.prepare(session, slam.STATIC_ZERO, stationary=True)
+    calls = []
+    class Client:
+        def _Call(self, api, parameter):
+            calls.append((api, json.loads(parameter)))
+            return 0, '{"succeed":true,"errorCode":0}'
+    factory = lambda *args: Client()
+    assert slam.command(session, slam.STATIC_ZERO, True, True, stationary=True,
+                        accept_static_zero=True, factory=factory) == 0
+    assert calls == [(1804, {'data': {'address': slam.read(session / 'session.json')['address'],
+                                     **slam.ZERO_POSE}})]
+    with pytest.raises(ValueError, match='already attempted'):
+        slam.prepare(session, 'relocate', stationary=True, accept_seed=True)
+    with pytest.raises(ValueError, match='already attempted'):
+        slam.prepare(session, slam.STATIC_ZERO, stationary=True, accept_static_zero=True)
+    assert len(calls) == 1
+
+
 def test_unique_map_per_session(setup):
     session, policy, _, _ = setup
     other = slam.initialize(session.parent, policy)

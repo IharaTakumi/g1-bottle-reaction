@@ -22,8 +22,10 @@ TOPICS = {
     'rt/slam_key_info': 'string',
     'rt/unitree_slam/waypoints': 'string',
     'rt/utlidar/cloud_livox_mid360': 'cloud',
+    'rt/utlidar/imu_livox_mid360': 'imu',
     'rt/unitree/slam_mapping/points': 'cloud',
     'rt/unitree/slam_relocation/points': 'cloud',
+    'rt/unitree/slam_relocation/global_map': 'cloud',
 }
 
 
@@ -38,11 +40,17 @@ def summarize(kind, sample):
             return {'text': sample.data}
     if kind == 'cloud':
         return {'header': asdict(sample.header), 'height': sample.height, 'width': sample.width,
+                'points': sample.width * sample.height,
                 'point_step': sample.point_step, 'row_step': sample.row_step,
                 'data_bytes': len(sample.data), 'fields': [asdict(f) for f in sample.fields],
                 'layout_consistent': len(sample.data) == sample.row_step * sample.height
                     and sample.row_step >= sample.width * sample.point_step,
                 'is_dense': sample.is_dense, 'is_bigendian': sample.is_bigendian}
+    if kind == 'imu':
+        return {'header': asdict(sample.header),
+                'orientation': asdict(sample.orientation),
+                'angular_velocity': asdict(sample.angular_velocity),
+                'linear_acceleration': asdict(sample.linear_acceleration)}
     if kind == 'odomstate':
         return {'stamp': asdict(sample.stamp), 'position': list(sample.position),
                 'velocity': list(sample.velocity), 'imu_rpy': list(sample.imu_state.rpy),
@@ -64,11 +72,19 @@ def source_stamp(payload):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--seconds', type=float, default=15, help='Receive window after 5s discovery (max 60)')
+    parser.add_argument('--seconds', type=float, default=15, help='Receive window after discovery (max 60)')
+    parser.add_argument('--discovery-seconds', type=float, default=5,
+                        help='Discovery window before selecting matching schemas (max 60)')
     parser.add_argument('--group', choices=['state', 'cloud', 'all'], default='state')
+    parser.add_argument('--sample-period', type=float, default=2,
+                        help='Seconds between sample summaries; 0 logs every received sample (no cloud payload)')
     args = parser.parse_args()
     if not 0 < args.seconds <= 60:
         parser.error('--seconds must be in (0, 60]')
+    if not 0 < args.discovery_seconds <= 60:
+        parser.error('--discovery-seconds must be in (0, 60]')
+    if not 0 <= args.sample_period <= 60:
+        parser.error('--sample-period must be in [0, 60]')
     root = Path(__file__).resolve().parents[1]
     config = (root / 'config/g1-readonly-dds.xml').read_text()
     os.environ['CYCLONEDDS_URI'] = config
@@ -86,12 +102,13 @@ def main():
     own_guid = str(participant.guid)
     emit = lambda obj: print(json.dumps(obj), flush=True)
     emit({'event': 'start', 'interface': 'enp129s0', 'domain': 0,
-          'own_participant': own_guid, 'receive_seconds': args.seconds, 'group': args.group})
+          'own_participant': own_guid, 'receive_seconds': args.seconds, 'group': args.group,
+          'discovery_seconds': args.discovery_seconds, 'sample_period': args.sample_period})
     builtins = [('publication', BuiltinDataReader(participant, BuiltinTopicDcpsPublication)),
                 ('subscription', BuiltinDataReader(participant, BuiltinTopicDcpsSubscription))]
     published = {}
     seen = set()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + args.discovery_seconds
     while time.monotonic() < deadline:
         for direction, reader in builtins:
             for s in reader.take(100):
@@ -108,7 +125,7 @@ def main():
                       'qos': str(s.qos)})
         time.sleep(0.05)
 
-    schemas = UnitreeSdkRuntime().load_readonly_navigation_types()
+    schemas = UnitreeSdkRuntime().load_readonly_navigation_probe_types()
     readers, topics, listeners, stats = {}, {}, {}, {}
     for name, kind in TOPICS.items():
         if args.group != 'all' and (kind == 'cloud') != (args.group == 'cloud'):
@@ -117,7 +134,9 @@ def main():
         expected = schema.__idl_typename__.replace('.', '::')
         stats[name] = {'kind': kind, 'samples': 0, 'matched_current': 0, 'matched_total': 0,
                        'incompatible_qos': 0, 'stamp_changes': 0, 'last_stamp': None,
-                       'last_by_type': {}, 'observed_types': sorted(published.get(name, set()))}
+                       'last_by_type': {}, 'observed_types': sorted(published.get(name, set())),
+                       'reader_created_unix_ns': None, 'first_match_unix_ns': None,
+                       'first_sample_unix_ns': None, 'last_sample_unix_ns': None}
         item = stats[name]
         if expected not in published.get(name, set()):
             item['skipped'] = 'no publication with matching SDK type in discovery window'
@@ -125,15 +144,19 @@ def main():
         def matched(reader, status, item=item):
             item['matched_current'] = status.current_count
             item['matched_total'] = status.total_count
+            if status.current_count > 0 and item['first_match_unix_ns'] is None:
+                item['first_match_unix_ns'] = time.time_ns()
         def incompatible(reader, status, item=item):
             item['incompatible_qos'] = status.total_count
         listeners[name] = Listener(on_subscription_matched=matched, on_requested_incompatible_qos=incompatible)
         topics[name] = Topic(participant, name, schema)
+        item['reader_created_unix_ns'] = time.time_ns()
         readers[name] = DataReader(participant, topics[name],
             Qos(Policy.Reliability.BestEffort, Policy.Durability.Volatile, Policy.History.KeepLast(1)),
             listener=listeners[name])
     next_print = {}
-    deadline = time.monotonic() + args.seconds
+    receive_started = time.monotonic()
+    deadline = receive_started + args.seconds
     while time.monotonic() < deadline:
         for name, reader in readers.items():
             item = stats[name]
@@ -141,7 +164,11 @@ def main():
                 if isinstance(s, InvalidSample):
                     continue
                 payload = summarize(item['kind'], s)
+                received_unix_ns = time.time_ns()
                 item['samples'] += 1
+                if item['first_sample_unix_ns'] is None:
+                    item['first_sample_unix_ns'] = received_unix_ns
+                item['last_sample_unix_ns'] = received_unix_ns
                 stamp = source_stamp(payload)
                 if stamp is not None and stamp != item['last_stamp']:
                     item['stamp_changes'] += 1
@@ -153,10 +180,15 @@ def main():
                     item['last_by_type'][category] = payload
                 key = (name, category)
                 if time.monotonic() >= next_print.get(key, 0):
-                    emit({'event': 'sample', 'topic': name, 'payload': payload})
-                    next_print[key] = time.monotonic() + 2
+                    emit({'event': 'sample', 'topic': name, 'payload': payload,
+                          'received_monotonic': time.monotonic(),
+                          'received_unix_ns': received_unix_ns})
+                    next_print[key] = time.monotonic() + args.sample_period
         time.sleep(0.02)
-    emit({'event': 'summary', 'topics': stats})
+    elapsed = time.monotonic() - receive_started
+    for item in stats.values():
+        item['observed_rate_hz'] = item['samples'] / elapsed
+    emit({'event': 'summary', 'receive_elapsed_s': elapsed, 'topics': stats})
     return 0 if any(v['samples'] for v in stats.values()) else 2
 
 

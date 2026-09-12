@@ -5,6 +5,7 @@ Only RTPS packet headers and source addresses are recorded, not payloads.
 This identifies network origin of participant GUID prefixes, not remote PIDs.
 """
 import argparse
+import ipaddress
 import json
 import socket
 import time
@@ -20,11 +21,13 @@ def rtps_identity(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seconds', type=float, default=25)
+    parser.add_argument('--local-ip', type=ipaddress.IPv4Address, default='192.168.123.99',
+                        help='Existing enp129s0 IPv4 address; does not configure the interface')
     args = parser.parse_args()
     if not 0 < args.seconds <= 60:
         parser.error('--seconds must be in (0, 60]')
     interface = 'enp129s0'
-    local_ip = '192.168.123.99'
+    local_ip = str(args.local_ip)
     ifindex = socket.if_nametoindex(interface)
     membership = socket.inet_aton('239.255.0.1') + socket.inet_aton(local_ip) + ifindex.to_bytes(4, 'little')
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:

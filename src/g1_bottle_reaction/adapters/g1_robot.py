@@ -212,6 +212,40 @@ class UnitreeSdkRuntime:
         return {"odometry": Odometry_, "cloud": PointCloud2_,
                 "string": String_, "odomstate": SportModeState_}
 
+    def load_readonly_navigation_probe_types(self) -> dict[str, Any]:
+        """Extended telemetry schemas selected only after live type discovery."""
+        from cyclonedds.idl import make_idl_struct
+        import cyclonedds.idl.types as types
+        from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import (
+            PointStamped_, Quaternion_, Vector3_,
+        )
+        from unitree_sdk2py.idl.std_msgs.msg.dds_ import Header_
+
+        schemas = self.load_readonly_navigation_types()
+
+        # Official unitree_sdk2 C++ hg/SportModeState_.hpp, whose generated
+        # type name is also checked against live DDS discovery before use.
+        HgSportModeState_ = make_idl_struct(
+            "HgSportModeState_", "unitree_hg.msg.dds_.SportModeState_",
+            {"fsm_id": types.uint32, "fsm_mode": types.uint32,
+             "task_id": types.uint32, "task_time": types.float32},
+        )
+
+        # sensor_msgs/Imu standard field order. The installed Unitree Python
+        # SDK omits this generated wrapper but supplies all nested schemas.
+        Imu_ = make_idl_struct(
+            "Imu_", "sensor_msgs.msg.dds_.Imu_",
+            {"header": Header_, "orientation": Quaternion_,
+             "orientation_covariance": types.array[types.float64, 9],
+             "angular_velocity": Vector3_,
+             "angular_velocity_covariance": types.array[types.float64, 9],
+             "linear_acceleration": Vector3_,
+             "linear_acceleration_covariance": types.array[types.float64, 9]},
+        )
+
+        schemas.update(hg_sport=HgSportModeState_, imu=Imu_, range=PointStamped_)
+        return schemas
+
     def _load_video_client_type(self) -> Any:
         if self._video_client_loader is not None:
             return self._video_client_loader()

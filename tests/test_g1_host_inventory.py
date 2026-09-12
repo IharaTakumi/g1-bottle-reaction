@@ -8,6 +8,13 @@ HOSTS = runpy.run_path(str(ROOT / 'scripts/read-g1-dds-hosts.py'))
 PCD = runpy.run_path(str(ROOT / 'scripts/inspect-pcd-header.py'))
 
 
+def test_invalid_local_ip_exits_before_socket(monkeypatch):
+    monkeypatch.setattr('sys.argv', ['read-g1-dds-hosts.py', '--local-ip', 'not-an-ip'])
+    with pytest.raises(SystemExit) as exc:
+        HOSTS['main']()
+    assert exc.value.code == 2
+
+
 def test_rtps_identity_does_not_decode_guid_as_ip():
     prefix = bytes.fromhex('01101c9b7042ed0f85113fc3')
     result = HOSTS['rtps_identity'](b'RTPS\x02\x01\x01\x10' + prefix)
