@@ -49,18 +49,28 @@ def inspect_interfaces() -> list[dict]:
     interfaces = json.loads(result.stdout)
     for nic in interfaces:
         path = Path("/sys/class/net") / nic["ifname"]
+        nic["wireless"] = (path / "wireless").exists()
         nic["wired"] = (nic.get("link_type") == "ether"
                         and (path / "device").exists()
-                        and not (path / "wireless").exists())
+                        and not nic["wireless"])
     return interfaces
 
 
-def select_interface(interfaces: list[dict], name: str | None, peer=None) -> tuple[str, list[str]]:
+def select_interface(
+    interfaces: list[dict],
+    name: str | None,
+    peer=None,
+    *,
+    allow_wireless: bool = False,
+) -> tuple[str, list[str]]:
     candidates = []
     for nic in interfaces:
         if name and nic["ifname"] != name:
             continue
-        if not nic.get("wired") or "LOWER_UP" not in nic.get("flags", []):
+        path = Path("/sys/class/net") / nic["ifname"]
+        wireless = nic.get("wireless", (path / "wireless").exists())
+        allowed_link = nic.get("wired") or (allow_wireless and wireless)
+        if not allowed_link or "LOWER_UP" not in nic.get("flags", []):
             continue
         ips = [f'{a["local"]}/{a["prefixlen"]}' for a in nic.get("addr_info", [])
                if a["family"] == "inet" and a.get("scope") == "global"]
@@ -70,9 +80,10 @@ def select_interface(interfaces: list[dict], name: str | None, peer=None) -> tup
         if ips:
             candidates.append((nic["ifname"], ips))
     if len(candidates) != 1:
-        raise RuntimeError("Cannot uniquely select a connected wired NIC with IPv4. "
-                           "Use --list-interfaces, connect the cable, then specify "
-                           "--network-interface and optionally --g1-ip. No settings were changed.")
+        link = "network" if allow_wireless else "wired"
+        raise RuntimeError(f"Cannot uniquely select a connected {link} interface with IPv4. "
+                           "Use --list-interfaces, then specify --network-interface and "
+                           "optionally --g1-ip. No settings were changed.")
     return candidates[0]
 
 
@@ -81,7 +92,7 @@ def verify_route(peer, interface: str) -> None:
                             check=True, capture_output=True, text=True)
     routes = json.loads(result.stdout)
     if not routes or routes[0].get("dev") != interface or routes[0].get("gateway"):
-        raise RuntimeError("G1 IP does not have a direct route through the selected wired NIC")
+        raise RuntimeError("G1 IP does not have a direct route through the selected interface")
 
 
 class CameraRuntime:

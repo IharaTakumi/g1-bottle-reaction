@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import ipaddress
+import inspect
 import json
 import math
 import os
@@ -170,6 +171,9 @@ def validate_args(args):
     if args.banana_confidence is not None and (not math.isfinite(args.banana_confidence)
                                                 or not 0 < args.banana_confidence <= 1):
         raise ValueError("--banana-confidence must be in (0, 1]")
+    if args.plushie_confidence is not None and (not math.isfinite(args.plushie_confidence)
+                                                 or not 0 < args.plushie_confidence <= 1):
+        raise ValueError("--plushie-confidence must be in (0, 1]")
     if not math.isfinite(args.yolo_fps) or not 0 < args.yolo_fps <= 60:
         raise ValueError("--yolo-fps must be in (0, 60]")
     bind = ipaddress.IPv4Address(args.usb_bind)
@@ -180,25 +184,70 @@ def validate_args(args):
         raise ValueError("--start-usb-sender requires the verified, distinct Ubuntu/G1 LAN addresses")
     if not 1024 <= args.usb_port <= 65535:
         raise ValueError("--usb-port must be 1024..65535")
+    if not 1024 <= args.g1_camera_port <= 65535:
+        raise ValueError("--g1-camera-port must be 1024..65535")
+    if not math.isfinite(args.g1_camera_fps) or not 0 < args.g1_camera_fps <= 60:
+        raise ValueError("--g1-camera-fps must be in (0, 60]")
+    if args.source != "dual" and (args.no_usb_camera or args.g1_camera_transport != "direct-dds"):
+        raise ValueError("--no-usb-camera and --g1-camera-transport apply only to --source dual")
+    if args.no_usb_camera and args.start_usb_sender:
+        raise ValueError("--no-usb-camera cannot be combined with --start-usb-sender")
+    if (args.source == "dual" and not args.no_usb_camera
+            and args.g1_camera_transport == "ssh-rtp"
+            and args.g1_camera_port == args.usb_port):
+        raise ValueError("G1 and USB camera RTP ports must be different")
+    if args.g1_camera_transport == "ssh-rtp" and host.is_loopback:
+        raise ValueError("--g1-camera-transport ssh-rtp requires a non-loopback --usb-host")
     if args.duration is not None and (not math.isfinite(args.duration) or args.duration <= 0):
         raise ValueError("--duration must be finite and positive")
     if args.max_frames is not None and args.max_frames <= 0:
         raise ValueError("--max-frames must be positive")
+    if args.robot in {"g1", "g1-ssh"}:
+        if not args.found_audio:
+            raise ValueError("real robot adapters require --found-audio")
+        if not args.enable_real_robot or args.g1_motion != "safe-actions":
+            raise ValueError(
+                "Real G1 reaction requires --enable-real-robot "
+                "--g1-motion safe-actions"
+            )
+        if args.robot == "g1-ssh" and not args.execute_real_action:
+            raise ValueError("--robot g1-ssh requires --execute-real-action")
+    elif args.enable_real_robot or args.g1_motion != "disabled":
+        raise ValueError("Real robot safety flags require --robot g1")
+    if args.execute_real_action and args.robot != "g1-ssh":
+        raise ValueError("--execute-real-action is restricted to --robot g1-ssh")
     if any((args.publish_processed, args.publish_safety, args.vision_preset, args.fog_mode,
             args.fov_scale is not None, args.fov_feather is not None, args.config,
             args.display, args.network_address)):
         raise ValueError("dual/usb-lan are plain RGB viewers; processing and legacy DDS address flags do not apply")
 
 
-def start_sender(args):
-    route = subprocess.run(["ip", "-j", "route", "get", args.usb_host],
+def resolve_g1_route(local_address, host_address, requested_interface=None):
+    """Resolve and validate one direct local route without changing networking."""
+    route = subprocess.run(["ip", "-j", "route", "get", str(host_address)],
                            check=True, capture_output=True, text=True)
     routes = json.loads(route.stdout)
-    if not routes or routes[0].get("gateway") or routes[0].get("prefsrc") != args.usb_bind:
-        raise RuntimeError("G1 must have a direct wired route from --usb-bind; no network settings were changed")
+    if not routes or routes[0].get("gateway") or routes[0].get("prefsrc") != str(local_address):
+        raise RuntimeError("G1 must have a direct route from --usb-bind; no network settings were changed")
     interface = routes[0].get("dev", "")
-    if (Path("/sys/class/net") / interface / "wireless").exists():
-        raise RuntimeError("USB sender test requires the existing wired LAN route")
+    if not interface or (requested_interface and interface != requested_interface):
+        raise RuntimeError("G1 route does not use --network-interface; no network settings were changed")
+    return interface
+
+
+def resolve_ssh_target(args):
+    """Use the G1 address for SSH unless an explicit alias/target was supplied."""
+    if args.ssh_target:
+        return args.ssh_target
+    host = ipaddress.IPv4Address(args.usb_host)
+    return "g1" if host.is_loopback else f"unitree@{host}"
+
+
+def start_sender(args, ssh_target=None, route_interface=None):
+    if route_interface is None:
+        route_interface = resolve_g1_route(
+            args.usb_bind, args.usb_host, args.network_interface
+        )
     remote = (ROOT / "tools/g1_usb_send.py").read_text()
     argv = ["python3", "-u", "-B", "-c", remote, "--watch-stdin", "--dest", args.usb_bind,
             "--bind", args.usb_host, "--port", str(args.usb_port), "--width", str(args.usb_width),
@@ -208,35 +257,65 @@ def start_sender(args):
     ssh = ["ssh", "-T", "-o", "StrictHostKeyChecking=yes"]
     if args.ssh_control:
         ssh += ["-S", args.ssh_control, "-o", "BatchMode=yes"]
-    ssh += ["--", args.ssh_target, shlex.join(argv)]
+    ssh += ["--", ssh_target or resolve_ssh_target(args), shlex.join(argv)]
     # stdin EOF is the robot-side supervisor's cleanup signal.
+    return subprocess.Popen(ssh, stdin=subprocess.PIPE)
+
+
+def start_g1_camera_sender(args, ssh_target=None):
+    """Start receive-only VideoClient on G1 and send its JPEG over RTP."""
+    from g1_bottle_reaction.adapters.g1_robot import serve_remote_camera_sender
+
+    source = inspect.getsource(serve_remote_camera_sender) + "\nserve_remote_camera_sender()\n"
+    argv = [
+        "python3", "-u", "-B", "-c", source,
+        "--dest", args.usb_bind,
+        "--bind", args.usb_host,
+        "--port", str(args.g1_camera_port),
+        "--fps", str(args.g1_camera_fps),
+    ]
+    if args.duration:
+        argv += ["--duration", str(math.ceil(args.duration) + 60)]
+    ssh = ["ssh", "-T", "-o", "StrictHostKeyChecking=yes"]
+    if args.ssh_control:
+        ssh += ["-S", args.ssh_control, "-o", "BatchMode=yes"]
+    ssh += ["--", ssh_target or resolve_ssh_target(args), shlex.join(argv)]
     return subprocess.Popen(ssh, stdin=subprocess.PIPE)
 
 
 def run(args):
     validate_args(args)
-    found_settings = banana_settings = None
-    banana_confidence = None
+    ssh_target = resolve_ssh_target(args)
+    route_interface = None
+    g1_host = ipaddress.IPv4Address(args.usb_host)
+    if not g1_host.is_loopback and (args.source == "dual" or args.start_usb_sender):
+        route_interface = resolve_g1_route(
+            args.usb_bind, args.usb_host, args.network_interface
+        )
+    found_settings = banana_settings = plushie_settings = None
+    banana_confidence = plushie_confidence = None
     if args.yolo:
-        from .person_yolo import load_banana_confidence
+        from .person_yolo import load_banana_confidence, load_plushie_confidence
         banana_confidence = load_banana_confidence(args, ROOT)
+        plushie_confidence = load_plushie_confidence(args, ROOT)
     if args.found_audio:
-        from .found_audio import load_banana_settings, load_settings
+        from .found_audio import load_banana_settings, load_plushie_settings, load_settings
         found_settings = load_settings(args, ROOT)
         banana_settings = load_banana_settings(ROOT, banana_confidence, found_settings.output)
+        plushie_settings = load_plushie_settings(ROOT, plushie_confidence, found_settings.output)
     if not args.headless and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         raise RuntimeError("A desktop session is required; otherwise use --headless")
     readers = {}
     yolo = None
-    audio = gate = banana_gate = None
+    reaction = gate = banana_gate = plushie_gate = None
     found_label = None
     boxes = True
     detection = None
-    sender = None
+    usb_sender = g1_sender = None
     opened = False
     stopped_sender_reported = False
-    window = "G1 + USB Head Camera"
-    mode = "dual" if args.source == "dual" else "usb"
+    window = "G1 Built-in Camera" if args.no_usb_camera else "G1 + USB Head Camera"
+    mode = "g1" if args.no_usb_camera else ("dual" if args.source == "dual" else "usb")
     fullscreen = bool(args.fullscreen)
     helper = str(ROOT / "tools/g1_camera_pipe.py")
     start = time.monotonic()
@@ -248,51 +327,123 @@ def run(args):
     first_display = None
     try:
         if found_settings:
-            from .found_audio import FoundGate, SingleAudioWorker, select_audio_trigger
+            from .found_audio import (
+                ConsoleWavOutput,
+                FoundGate,
+                FoundReactionController,
+                select_audio_trigger,
+            )
             from g1_bottle_reaction.adapters.cached_audio import G1SshAudioOutput, LinuxAplayOutput
+            from g1_bottle_reaction.adapters.g1_robot import G1RobotAdapter
+            from g1_bottle_reaction.adapters.g1_ssh_safe_action import SshG1SafeActionAdapter
+            from g1_bottle_reaction.adapters.mock_robot import MockRobotAdapter
+            from g1_bottle_reaction.config.loader import load_config
+            from g1_bottle_reaction.state.events import ReactionEvent
+
             gate = FoundGate(found_settings.duration, found_settings.grace, found_settings.cooldown,
                              found_settings.confidence, found_settings.rearm_absence)
             banana_gate = FoundGate(banana_settings.duration, banana_settings.grace,
                                     banana_settings.cooldown, banana_settings.confidence,
                                     banana_settings.rearm_absence, object_attribute="bananas")
+            plushie_gate = FoundGate(plushie_settings.duration, plushie_settings.grace,
+                                     plushie_settings.cooldown, plushie_settings.confidence,
+                                     plushie_settings.rearm_absence, object_attribute="plushies")
             if found_settings.output == "g1":
-                output = G1SshAudioOutput(args.ssh_target, args.ssh_control)
-            else:
+                output = G1SshAudioOutput(ssh_target, args.ssh_control)
+            elif found_settings.output == "pc":
                 output = LinuxAplayOutput()
-            audio = SingleAudioWorker(output, found_settings.sounds)
-            print(f"FOUND AUDIO: output={found_settings.output}, files={len(found_settings.sounds)}, "
+            else:
+                output = ConsoleWavOutput()
+            core_config = load_config(ROOT / "config/default.yaml")
+            if args.robot == "g1":
+                robot = G1RobotAdapter(
+                    args.network_interface or "",
+                    enabled=args.enable_real_robot,
+                    motion_mode=args.g1_motion,
+                    timeout_seconds=core_config.g1.client_timeout_seconds,
+                    release_delay_seconds=core_config.g1.arm_release_delay_seconds,
+                )
+                robot.initialize()
+            elif args.robot == "g1-ssh":
+                robot = SshG1SafeActionAdapter(
+                    ssh_target,
+                    args.ssh_control,
+                    enabled=args.enable_real_robot,
+                    motion_mode=args.g1_motion,
+                    execute_real_action=args.execute_real_action,
+                )
+                robot.initialize()
+            else:
+                robot = MockRobotAdapter()
+            reaction = FoundReactionController(
+                {
+                    "person": found_settings,
+                    "banana": banana_settings,
+                    "plushie": plushie_settings,
+                },
+                output,
+                robot,
+                base_reaction=core_config.reaction.items[ReactionEvent.FOUND.value],
+                cooldown_seconds=core_config.reaction.cooldown_seconds,
+            )
+            print(f"FOUND REACTION: robot={args.robot}, output={found_settings.output}, "
+                  f"motion=notice, files={len(found_settings.sounds)}, "
                   f"duration={gate.duration}s, grace={gate.grace}s, cooldown={gate.cooldown}s, "
                   f"rearm absence={gate.rearm_absence}s; ONCE UNTIL PERSON LEAVES", flush=True)
             print(f"BANANA AUDIO: files={len(banana_settings.sounds)}, duration={banana_gate.duration}s, "
                   f"priority=PERSON; ONCE UNTIL BANANA LEAVES", flush=True)
+            print(f"PLUSHIE AUDIO: files={len(plushie_settings.sounds)}, duration={plushie_gate.duration}s, "
+                  f"YOLO class=77 teddy bear; ONCE UNTIL PLUSHIE LEAVES", flush=True)
         if args.source == "dual":
-            cmd = [sys.executable, "-B", helper, "g1"]
-            if args.network_interface:
-                cmd += ["--interface", args.network_interface]
+            if args.g1_camera_transport == "ssh-rtp":
+                cmd = [args.gst_python, "-B", helper, "rtp", "--label", "G1",
+                       "--bind", args.usb_bind, "--port", str(args.g1_camera_port)]
+            else:
+                cmd = [sys.executable, "-B", helper, "g1"]
+                camera_interface = args.network_interface or route_interface
+                if camera_interface:
+                    cmd += ["--interface", camera_interface]
+                if not g1_host.is_loopback:
+                    cmd += ["--g1-ip", str(g1_host)]
             readers["g1"] = LatestReader("G1", cmd)
-        readers["usb"] = LatestReader("USB", [args.gst_python, "-B", helper, "usb",
-                                               "--bind", args.usb_bind, "--port", str(args.usb_port)])
+        if not args.no_usb_camera:
+            readers["usb"] = LatestReader(
+                "USB", [args.gst_python, "-B", helper, "rtp", "--label", "USB",
+                        "--bind", args.usb_bind, "--port", str(args.usb_port)])
         for reader in readers.values():
             reader.start()
         if args.yolo:
             from .person_yolo import PersonWorker, TransitionLogger, visible_detection
             yolo = PersonWorker(lambda: readers["g1"].snapshot(consume=False), args.yolo_model,
                                 args.yolo_confidence, banana_confidence, args.yolo_fps,
-                                ROOT / ".runtime/yolo")
+                                ROOT / ".runtime/yolo", plushie_confidence=plushie_confidence)
             transitions = TransitionLogger()
             yolo.start()
         if args.start_usb_sender:
-            sender = start_sender(args)
+            usb_sender = start_sender(args, ssh_target, route_interface)
+        if args.g1_camera_transport == "ssh-rtp":
+            g1_sender = start_g1_camera_sender(args, ssh_target)
         if not args.headless:
             cv2.namedWindow(window, cv2.WINDOW_NORMAL)
             opened = True
             cv2.resizeWindow(window, 1280, 540)
             cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN,
                                  cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
-        print("1=G1 2=USB 3=dual f=fullscreen q/Esc=exit; local age is NOT capture-to-display latency", flush=True)
+            topmost = getattr(cv2, "WND_PROP_TOPMOST", None)
+            if topmost is not None:
+                try:
+                    cv2.setWindowProperty(window, topmost, 1)
+                except cv2.error:
+                    pass
+        controls = "1=G1 f=fullscreen q/Esc=exit" if args.no_usb_camera else \
+            "1=G1 2=USB 3=dual f=fullscreen q/Esc=exit"
+        print(f"{controls}; local age is NOT capture-to-display latency", flush=True)
         if yolo:
-            print("y=YOLO ON/OFF b=boxes ON/OFF; PERSON+BANANA ON G1 ONLY; "
-                  "AUDIO PRIORITY=PERSON; NO ROBOT MOTION COMMANDS", flush=True)
+            print("y=YOLO ON/OFF b=boxes ON/OFF; PERSON+BANANA+PLUSHIE ON G1 ONLY; "
+                  f"REACTION PRIORITY=PERSON>BANANA>PLUSHIE; ROBOT={args.robot.upper()}", flush=True)
+        if (args.start_usb_sender or args.g1_camera_transport == "ssh-rtp"
+                or (found_settings and found_settings.output == "g1")):
+            print(f"G1 SSH TARGET: {ssh_target}", flush=True)
         while True:
             now = time.monotonic()
             states = {key: r.snapshot() for key, r in readers.items()}
@@ -305,32 +456,41 @@ def run(args):
                     print(message, flush=True)
                 if gate:
                     trigger = select_audio_trigger(
-                        detection, now, gate, banana_gate,
-                        audio_busy=audio.busy or bool(audio.error))
+                        detection, now, gate, banana_gate, plushie_gate,
+                        audio_busy=reaction.busy or bool(reaction.audio_error))
                     if trigger == "person":
-                        if audio.submit(found_settings.sounds):
-                            print(f"PERSON AUDIO TRIGGER: cooldown {gate.cooldown:.2f}s", flush=True)
+                        if reaction.trigger(trigger, now):
+                            print(f"PERSON REACTION TRIGGER: cooldown {gate.cooldown:.2f}s", flush=True)
                     elif trigger == "banana":
-                        if audio.submit(banana_settings.sounds):
-                            print(f"BANANA AUDIO TRIGGER: cooldown {banana_gate.cooldown:.2f}s", flush=True)
-                    found_label = ("AUDIO ERROR (disabled)" if audio.error else
-                                   f"P {gate.compact_label(now)} | B {banana_gate.compact_label(now)}")
+                        if reaction.trigger(trigger, now):
+                            print(f"BANANA REACTION TRIGGER: cooldown {banana_gate.cooldown:.2f}s", flush=True)
+                    elif trigger == "plushie":
+                        if reaction.trigger(trigger, now):
+                            print(f"PLUSHIE REACTION TRIGGER: cooldown {plushie_gate.cooldown:.2f}s", flush=True)
+                    found_label = ("AUDIO ERROR (disabled)" if reaction.audio_error else
+                                   f"P {gate.compact_label(now)} | B {banana_gate.compact_label(now)} | "
+                                   f"T {plushie_gate.compact_label(now)}")
+                    if reaction.motion_error:
+                        found_label = f"MOTION ERROR (disabled) | {found_label}"
             live = all(s.frame is not None and not s.error and now - s.stamp <= 0.5 for s in states.values())
             if live:
                 both_since = both_since if both_since is not None else now
                 continuous = max(continuous, now - both_since)
             else:
                 both_since = None
-            if sender is not None and sender.poll() is not None and not stopped_sender_reported:
-                print(f"USB sender exited: {sender.returncode}; other camera continues", flush=True)
+            if usb_sender is not None and usb_sender.poll() is not None and not stopped_sender_reported:
+                print(f"USB sender exited: {usb_sender.returncode}; other camera continues", flush=True)
                 stopped_sender_reported = True
+            if g1_sender is not None and g1_sender.poll() is not None:
+                print(f"G1 camera sender exited: {g1_sender.returncode}", flush=True)
+                g1_sender = None
             if opened:
                 cv2.imshow(window, compose(states, mode, now, usb_rotate=args.usb_rotate,
                                           detection=detection, boxes=boxes, found_label=found_label))
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q"), 27) or cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) < 1:
                     break
-                if key in (ord("1"), ord("2"), ord("3")):
+                if not args.no_usb_camera and key in (ord("1"), ord("2"), ord("3")):
                     mode = {ord("1"): "g1", ord("2"): "usb", ord("3"): "dual"}[key]
                 if key == ord("y") and yolo:
                     print(f"YOLO: {'ON' if yolo.toggle() else 'OFF'}", flush=True)
@@ -363,28 +523,32 @@ def run(args):
             time.sleep(0.01)
     finally:
         try:
-            if sender:
-                sender.stdin.close()
-                try:
-                    sender.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    sender.terminate()
-                    try:
-                        sender.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        sender.kill()
-                        sender.wait()
+            if reaction:
+                reaction.close()
         finally:
-            if audio:
-                audio.close()
-            if yolo:
-                yolo.close()
-                print(yolo.summary(), flush=True)
-            for reader in readers.values():
-                reader.close()
-            if opened:
-                cv2.destroyAllWindows()
-                cv2.waitKey(1)
+            try:
+                for sender in (usb_sender, g1_sender):
+                    if sender is None:
+                        continue
+                    sender.stdin.close()
+                    try:
+                        sender.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        sender.terminate()
+                        try:
+                            sender.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            sender.kill()
+                            sender.wait()
+            finally:
+                if yolo:
+                    yolo.close()
+                    print(yolo.summary(), flush=True)
+                for reader in readers.values():
+                    reader.close()
+                if opened:
+                    cv2.destroyAllWindows()
+                    cv2.waitKey(1)
         for reader in readers.values():
             print(reader.summary(), flush=True)
         print(f"VIEW STOPPED; longest all-camera LIVE interval={continuous:.1f}s", flush=True)

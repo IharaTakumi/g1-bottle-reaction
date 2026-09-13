@@ -1,4 +1,4 @@
-# G1 person / banana → organized cached audio
+# G1 person / banana / plushie → cached audio + one safe reaction
 
 **2026-09-10: 2画面＋YOLOからG1本体の音声再生に成功し、ユーザーが「聞こえます」と確認しました。**
 PC側でカメラと音声のDDSを同時使用すると3102/3104が発生しました。接続共有や取得頻度低減でも
@@ -7,10 +7,19 @@ PC側でカメラと音声のDDSを同時使用すると3102/3104が発生しま
 G1の既存Python 3.8、unitree_sdk2py、cycloneddsを使用し、G1へファイル配置・インストールはしていません。
 音量はユーザー指定で85。カメラサービス/SDK/system設定には変更を加えていません。
 
-音声は明示的に `--found-audio` を指定した場合だけ有効です。G1内蔵カメラのYOLO結果だけを使います。
-personとbananaを同時検出した場合はpersonを優先し、音声を重ねたりqueueへ溜めたりしません。
-banana音声の再生中にpersonが現れた場合は、再生を途中で切らず、終了後にpersonを判定します。
-従来のカメラreader・YOLO worker・USB表示は変更せず、動作命令・TTS生成は追加しません。
+Reactionは明示的に `--found-audio` を指定した場合だけ有効です。G1内蔵カメラのYOLO結果だけを使います。
+person、banana、plushieを同時検出した場合はperson → banana → plushieの順に優先し、
+音声やmotionを重ねたりqueueへ溜めたりしません。plushieはYOLO COCOの`teddy bear`（class 77）を意味します。
+object音声の再生中に高優先度の対象が現れた場合は、再生を途中で切らず、終了後に判定します。
+従来のカメラreader・YOLO worker・USB表示と固定WAVを維持し、発火先を初期実装から残る
+`ReactionEngine`へ戻しました。TTS生成は追加しません。
+
+`--robot mock`（既定）はmotion名を表示するだけです。実機はDesktop側DDSを使用せず、
+`--robot g1-ssh --enable-real-robot --g1-motion safe-actions --execute-real-action` と
+`G1_ALLOW_REAL_ACTION=1` の全gateが必要です。選択したmotionは既存の `notice` だけです。
+認証済みSSH経由で起動したG1-local helperが公式 `G1ArmActionClient.GetActionList()` を確認し、
+ID 23とrelease ID 99が存在する場合のみ `ExecuteAction(23)`、2秒後に
+`ExecuteAction(99)` を1回ずつ送ります。歩行、locomotion、新規joint trajectoryはありません。
 
 ## 初期設定
 
@@ -19,26 +28,30 @@ confidenceは既存の `--yolo-confidence`（既定.25）と共通です。
 `--found-duration` / `--detection-grace` / `--audio-cooldown` / `--rearm-absence` で変更できます。
 
 最新指示「見つけている間ずっと喋る」を受け、映り続ける間は1回だけに変更しました。
-SEARCHING → DETECTING → 音声1回 → COOLDOWN → FOUND - WAITING FOR CLEAR。
+SEARCHING → DETECTING → Reaction（motion＋音声）1回 → COOLDOWN → FOUND - WAITING FOR CLEAR。
 クールダウンは発火時点から2秒。その後、人がいない新しい推論結果が1秒以上継続した場合だけSEARCHINGへ戻ります。
 再登場時は改めて0.3秒のperson検出が必要。短い検出抜けでは再発火しません。
 YOLO停止・カメラ切断・古い結果の再利用を「人が去った」とは扱いません。
 個人識別はしないため、複数人の場合も全員が画角からいなくなるまで再発火しません。
 単発frameや、同じ推論結果をGUIが繰り返し読むだけでは発火しません。
 短い検出抜けは.15秒まで許容。カメラ・推論の停止、YOLO OFF、長い検出抜けで検出継続時間を破棄します。
-音声だけを抑制し、COOLDOWN中もYOLO、映像、枠は継続。手動リセット `r` は追加していません。
+Reaction全体を抑制し、COOLDOWN中もYOLO、映像、枠は継続。手動リセット `r` は追加していません。
 
 ## 音声
 
 2026-09-12に旧hash名WAV 31個を整理しました。使用中のperson音声とユーザー提供のbanana音声だけを残し、
 不要な旧WAV 30個を削除しました。今後は `assets/audio/reactions/<対象>/<イベント>.wav` で追加します。
-この2ファイルはGit管理対象で、cloneした環境でもそのまま利用できます。
+2026-09-13にユーザー提供のplushie音声を追加しました。この3ファイルはGit管理対象で、
+cloneした環境でもそのまま利用できます。
 
 - `assets/audio/reactions/person/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（旧f0e5...音声）
 - `assets/audio/reactions/banana/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（banana_surprised.wav）
+- `assets/audio/reactions/plushie/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（plushie_affectionate.wav）
 
 bananaも0.3秒継続検出後に1回だけ再生します。実機で短い検出抜けが見られたためbananaだけ0.30秒まで
 検出抜けを許容し、画面から1秒以上消えた後に再発火可能です。
+plushieも同じ0.3秒継続、0.30秒dropout grace、2秒cooldown、1秒absenceの設定で、
+画面に映り続ける間はユーザー提供音声を1回だけ再生します。
 実際に使ったフルパスは `FOUND AUDIO: /home/.../xxxx.wav` とconsoleに出力します。
 固定音声なら `--found-sound /absolute/path.wav`。存在・非空PCM WAVを起動前に検証します。
 
@@ -54,14 +67,18 @@ DDSのtrace-free初期化をG1の音声専用process内で行います。音声�
 送信前にG1内でGetVolumeの応答を確認。最大10秒の準備確認で再試行するのは読み取りだけで、
 音声送信自体を自動再試行しません。SSHはBatchModeで実行しGUIでパスワード待ちにはなりません。
 一時SSH接続が切れた場合は、端末で再認証してviewerを起動し直してください。
-移動・姿勢・関節・腕・LED・TTS生成のAPIは使用しません。
+音声経路は移動・姿勢・関節・腕・LED・TTS生成のAPIを使用しません。実機motionをopt-inした場合だけ、
+上記の検証済みArm Action 23/99を`SshG1SafeActionAdapter`から使用します。
 system設定・依存packageの変更なし。
 
 明示的に `--found-output pc` を指定した場合のみ、追加したLinuxAplayOutputで
 PCの既存 `/usr/bin/aplay` → ALSA default（このPCではPipeWire）へ出力できます。
 
-専用threadは1つだけ。再生中の発火を受け付けず、再生queueは作らず、長い音声も重ねません。
+Reaction Engineはmotion用worker 1つとaudio用の固定1-worker executorを使用し、1イベントにつき
+audioとmotionを最大1回ずつほぼ同時に開始します。実行中の発火を受け付けず、長い音声やmotionを重ねません。
+motion失敗はaudioを止めず、audio失敗もG1-local helperのAction 99 cleanupを妨げません。
 再生エラー時は音声だけ無効化し、画面にAUDIO ERRORを表示。カメラ・YOLOは継続します。
+motion例外時はその例外をcamera loopへ返さず、以後のmotionを無効化して自動retryしません。
 終了時は専用SSHのstdinを閉じ、G1のhelperはEOFで自分のstreamを停止して終了します。
 既存USB送信やG1サービスを音声処理から停止しません。
 
@@ -70,18 +87,40 @@ PCの既存 `/usr/bin/aplay` → ALSA default（このPCではPipeWire）へ出�
 追加USBを外してG1起動 → 内蔵映像確認 → USB追加、認証済み一時SSH接続が有効な状態で実行します。
 既存viewerと二重起動せず、先にqで終了してください。
 
+ハードウェアへ音声・motionを送らないMock確認:
+
 ```bash
-/home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 192.168.123.200 --usb-host 192.168.123.164 --start-usb-sender --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/control --usb-rotate 180 --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0
+/home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 10.42.0.1 --usb-host 10.42.0.76 --network-interface wlp128s20f3 --no-usb-camera --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --plushie-confidence 0.25 --found-audio --found-output mock --robot mock
 ```
+
+```bash
+/home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 192.168.123.200 --usb-host 192.168.123.164 --start-usb-sender --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/control --usb-rotate 180 --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --plushie-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0
+```
+
+Ubuntu=`10.42.0.1`、G1 Wi-Fi=`10.42.0.76`の完全無線構成では、同じplushie対応版を次のように起動します。
+指定するControlMaster socketは`unitree@10.42.0.76`へ接続した無線用socketである必要があります。
+公開鍵認証だけで接続できない場合は、先に次の認証用接続を作成します（remote commandは実行しません）。
+
+```bash
+ssh -M -S /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control -o ControlPersist=600 -fN unitree@10.42.0.76
+```
+
+```bash
+G1_ALLOW_REAL_ACTION=1 /home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 10.42.0.1 --usb-host 10.42.0.76 --network-interface wlp128s20f3 --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control --g1-camera-transport ssh-rtp --g1-camera-port 56001 --g1-camera-fps 30 --no-usb-camera --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --plushie-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0 --robot g1-ssh --enable-real-robot --g1-motion safe-actions --execute-real-action
+```
+
+`--ssh-target`省略時は`unitree@10.42.0.76`が自動選択され、USB senderとG1 speakerが同じSSH先を使います。
+G1上の音声helperにある`eth0`はG1内部のUnitree DDS用であり、UbuntuからG1へのSSH宛先ではありません。
 
 キー: y=YOLO切替、b=枠切替、1/2/3=表示切替、f=fullscreen、q/Esc=終了。r操作は不要です。
 
-変更: config/person_found_audio.yaml、game_vision/found_audio.py、adapters/cached_audio.py、
-game_vision/app.py、game_vision/dual.py、tests/test_found_audio.py、この文書。
+変更: config/person_found_audio.yaml、config/yolo_objects.yaml、game_vision/person_yolo.py、
+game_vision/found_audio.py、adapters/cached_audio.py、game_vision/app.py、game_vision/dual.py、
+tests/test_person_yolo.py、tests/test_found_audio.py、reaction WAV、この文書。
 G1出力対応: adapters/g1_robot.py（音声限定SSH helper）、adapters/g1_audio.py、tests/test_g1_audio.py、tests/test_g1_cached_ssh.py。
 tools/g1_cached_sound.pyは単独切り分け用で、通常の2画面起動では使いません。
 
-自動テスト: 371 passed / 1 skipped。mockの--simulateも完走。新規依存の追加なし。
+自動テスト: 453 passed / 1 skipped。新規依存の追加なし。
 再発火抑制の修正後、ユーザーが「うまくいきました」と実機動作を確認しました。
 G1-local SDK経由の統合試験中もcamera約41 FPS / USB29.5 FPS / YOLO14.6 FPSを維持。
 音声APIの成功と、実際の聞こえ方は別に確認します。
@@ -90,6 +129,6 @@ G1-local SDK経由の統合試験中もcamera約41 FPS / USB29.5 FPS / YOLO14.6 
 
 カメラ画像は上部のカメラ情報欄・下部のYOLO/音声状態欄と分離しています。
 アスペクト比を保って画像全体を表示し、黒い情報帯で画角を覆いません。検出枠は画像領域に合わせて描画します。
-Gitには上記2つのreaction WAVを含めます。AivisSpeechの生成キャッシュ、モデル、venv、SDK checkout、
+Gitには上記3つのreaction WAVを含めます。AivisSpeechの生成キャッシュ、モデル、venv、SDK checkout、
 一時SSH接続や認証情報は含めません。別PCでもclone後は既定音声をそのまま利用できます。
 G1再起動後は一時SSH接続とUSB送信が終了するため、SSH再認証後にviewerを起動し直す必要があります。

@@ -1,4 +1,4 @@
-# G1内蔵 + G1頭部USBカメラ: 有線2画面表示
+# G1内蔵 + G1頭部USBカメラ: 有線／無線2画面表示
 
 起動順序の注意（2026-09-10実機確認）: **追加USBを外してG1を起動し、内蔵映像が復帰してから追加USBを挿してください。**
 追加USBを挿したまま再起動するとvideo番号が変わり、標準サービスの固定device指定とずれて
@@ -76,8 +76,19 @@ GUI終了時にはSSH stdinを閉じ、G1側supervisorが**自分で作ったGSt
 `--ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/control`を追加します。
 ControlMasterは単なる一時認証済み接続で、パスワードをファイルに保存しません。
 
+`--ssh-target`を省略した場合、非loopbackの`--usb-host`から
+`unitree@<usb-host>`を組み立て、USB camera senderと`--found-output g1`の音声で共用します。
+明示した`--ssh-target`は従来どおり優先されます。ControlMasterを使う場合、そのsocketは必ず
+同じG1 addressへ接続したものを指定してください。旧有線接続のsocketを無線用として再利用しません。
+
 現在値を確認してからIPv4を指定してください。自動sender開始前にdirect routeと送信元IPv4を確認し、
-既存有線経路と一致しなければ起動を拒否します。ネットワーク設定は変更しません。
+指定したaddressと実際のrouteが一致しなければ起動を拒否します。ネットワーク設定は変更しません。
+
+完全無線構成では、同じdirect-route検証をWi-Fiにも適用します。例えばUbuntu=`10.42.0.1`、
+G1 Wi-Fi=`10.42.0.76`の場合、`--usb-bind 10.42.0.1 --usb-host 10.42.0.76`を指定します。
+Ubuntu Wi-FiからのUnitree direct DDSは3102で失敗したため、内蔵カメラには
+`--g1-camera-transport ssh-rtp`を指定し、G1 PC2上の`eth0 / domain 0`でVideoClientを動かします。
+詳細と実測結果は[G1_CAMERA_WIRELESS.md](G1_CAMERA_WIRELESS.md)を参照してください。
 
 `--usb-device auto`（既定）は `/dev/v4l/by-id/` の `video-index0` からRealSenseを除外します。
 外付けUSBカメラがちょうど1台なら自動選択し、0台または複数なら誤選択を避けて起動を拒否します。

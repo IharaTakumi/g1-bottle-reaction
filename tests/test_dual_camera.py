@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import json
 import struct
 import sys
 import time
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -11,7 +13,10 @@ import pytest
 
 from g1_bottle_reaction.game_vision.app import build_parser
 from g1_bottle_reaction.game_vision.camera_ipc import BGR, HEADER, MAGIC, MAX_BYTES, receive, send
-from g1_bottle_reaction.game_vision.dual import FrameState, LatestReader, compose, letterbox, validate_args
+from g1_bottle_reaction.game_vision.dual import (
+    FrameState, LatestReader, compose, letterbox, resolve_g1_route,
+    resolve_ssh_target, start_g1_camera_sender, start_sender, validate_args,
+)
 
 
 def test_dual_cli_and_rotation():
@@ -21,12 +26,114 @@ def test_dual_cli_and_rotation():
     assert args.usb_rotate == 180 and args.fullscreen is False
     assert args.usb_port == 56000
     assert args.usb_device == "auto"
+    assert resolve_ssh_target(args) == "unitree@10.1.2.3"
+
+
+def test_real_reaction_requires_the_existing_three_safety_gates():
+    args = build_parser().parse_args([
+        "--source", "dual", "--yolo", "--found-audio", "--robot", "g1",
+        "--enable-real-robot", "--g1-motion", "safe-actions",
+    ])
+    validate_args(args)
+
+
+def test_g1_ssh_reaction_requires_all_cli_gates():
+    arguments = [
+        "--source", "dual", "--yolo", "--found-audio",
+        "--robot", "g1-ssh", "--enable-real-robot",
+        "--g1-motion", "safe-actions", "--execute-real-action",
+    ]
+    validate_args(build_parser().parse_args(arguments))
+    for missing in ("--enable-real-robot", "--execute-real-action"):
+        reduced = [item for item in arguments if item != missing]
+        with pytest.raises(ValueError):
+            validate_args(build_parser().parse_args(reduced))
+
+
+def test_explicit_ssh_alias_remains_supported_and_loopback_keeps_legacy_default():
+    args = build_parser().parse_args(["--source", "dual", "--ssh-target", "g1-wired"])
+    assert resolve_ssh_target(args) == "g1-wired"
+    args = build_parser().parse_args(["--source", "dual"])
+    assert resolve_ssh_target(args) == "g1"
+
+
+def test_direct_wireless_route_is_accepted_without_hardcoded_subnet(monkeypatch):
+    route = [{"dev": "wifi0", "prefsrc": "10.42.0.1"}]
+    monkeypatch.setattr(
+        "g1_bottle_reaction.game_vision.dual.subprocess.run",
+        lambda *a, **k: SimpleNamespace(stdout=json.dumps(route)),
+    )
+    assert resolve_g1_route("10.42.0.1", "10.42.0.76") == "wifi0"
+    assert resolve_g1_route("10.42.0.1", "10.42.0.76", "wifi0") == "wifi0"
+
+
+@pytest.mark.parametrize("route,interface", [
+    ([], None),
+    ([{"dev": "wifi0", "prefsrc": "10.42.0.2"}], None),
+    ([{"dev": "wifi0", "prefsrc": "10.42.0.1", "gateway": "10.42.0.254"}], None),
+    ([{"dev": "wifi0", "prefsrc": "10.42.0.1"}], "cable0"),
+])
+def test_route_rejects_wrong_source_gateway_or_interface(monkeypatch, route, interface):
+    monkeypatch.setattr(
+        "g1_bottle_reaction.game_vision.dual.subprocess.run",
+        lambda *a, **k: SimpleNamespace(stdout=json.dumps(route)),
+    )
+    with pytest.raises(RuntimeError):
+        resolve_g1_route("10.42.0.1", "10.42.0.76", interface)
+
+
+def test_sender_uses_same_wireless_addresses_and_resolved_ssh_target(monkeypatch):
+    args = build_parser().parse_args([
+        "--source", "dual", "--usb-bind", "10.42.0.1", "--usb-host", "10.42.0.76",
+        "--start-usb-sender",
+    ])
+    calls = []
+    monkeypatch.setattr(
+        "g1_bottle_reaction.game_vision.dual.subprocess.Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)) or SimpleNamespace(),
+    )
+    start_sender(args, resolve_ssh_target(args), "wifi0")
+    command, options = calls[0]
+    assert "unitree@10.42.0.76" in command
+    remote = command[-1]
+    assert "--dest 10.42.0.1" in remote
+    assert "--bind 10.42.0.76" in remote
+    assert options["stdin"] is not None
+
+
+def test_g1_camera_sender_runs_video_client_on_g1_and_uses_separate_port(monkeypatch):
+    args = build_parser().parse_args([
+        "--source", "dual", "--usb-bind", "10.42.0.1", "--usb-host", "10.42.0.76",
+        "--g1-camera-transport", "ssh-rtp", "--g1-camera-port", "56001",
+        "--no-usb-camera",
+    ])
+    validate_args(args)
+    calls = []
+    monkeypatch.setattr(
+        "g1_bottle_reaction.game_vision.dual.subprocess.Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)) or SimpleNamespace(),
+    )
+    start_g1_camera_sender(args, resolve_ssh_target(args))
+    command, options = calls[0]
+    assert "unitree@10.42.0.76" in command
+    remote = command[-1]
+    assert "--dest 10.42.0.1" in remote
+    assert "--bind 10.42.0.76" in remote
+    assert "--port 56001" in remote
+    assert "ChannelFactoryInitialize(0, \"eth0\")" in remote
+    assert "GetImageSample" in remote
+    assert options["stdin"] is not None
 
 
 @pytest.mark.parametrize("arguments", [
     ["--usb-bind", "bad"], ["--usb-bind", "0.0.0.0"], ["--usb-port", "0"],
     ["--duration", "nan"], ["--duration", "-1"], ["--start-usb-sender"],
     ["--vision-preset", "normal"], ["--publish-processed"], ["--max-frames", "0"],
+    ["--g1-camera-port", "0"], ["--g1-camera-fps", "0"],
+    ["--g1-camera-fps", "nan"], ["--no-usb-camera", "--start-usb-sender"],
+    ["--g1-camera-transport", "ssh-rtp"],
+    ["--enable-real-robot"],
+    ["--robot", "g1", "--yolo", "--found-audio"],
 ])
 def test_invalid_cli(arguments):
     with pytest.raises(ValueError):

@@ -61,12 +61,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--usb-bind", default="127.0.0.1", help="local IPv4 for USB RTP receiver")
     parser.add_argument("--usb-host", default="127.0.0.1", help="verified robot IPv4 for sender binding")
     parser.add_argument("--usb-port", type=int, default=56000)
+    parser.add_argument("--no-usb-camera", action="store_true",
+                        help="run the dual viewer with only the G1 built-in camera")
     parser.add_argument("--usb-width", type=int, choices=(640, 1280), default=1280)
     parser.add_argument("--usb-device", default="auto",
                         help="G1-side /dev/v4l/by-id path; auto selects one non-RealSense camera")
     parser.add_argument("--usb-rotate", type=int, choices=(0, 180), default=0, help="USB display rotation in degrees")
     parser.add_argument("--start-usb-sender", action="store_true", help="start supervised GStreamer sender over SSH")
-    parser.add_argument("--ssh-target", default="g1")
+    parser.add_argument("--g1-camera-transport", choices=("direct-dds", "ssh-rtp"),
+                        default="direct-dds",
+                        help="built-in camera transport; ssh-rtp runs VideoClient locally on G1")
+    parser.add_argument("--g1-camera-port", type=int, default=56001,
+                        help="local UDP port for G1 built-in camera RTP/JPEG")
+    parser.add_argument("--g1-camera-fps", type=float, default=30,
+                        help="maximum G1-side VideoClient send rate for ssh-rtp")
+    parser.add_argument(
+        "--ssh-target",
+        help="SSH host/alias; default unitree@<usb-host> (or g1 with loopback defaults)",
+    )
     parser.add_argument("--ssh-control", help="optional existing SSH control socket")
     parser.add_argument("--gst-python", default="/usr/bin/python3", help="existing system Python with GI/GStreamer")
     parser.add_argument("--duration", type=float, help="dual/usb-lan run duration in seconds")
@@ -75,6 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yolo-confidence", type=float, default=0.25)
     parser.add_argument("--banana-confidence", type=float,
                         help="banana threshold; default from config/yolo_objects.yaml")
+    parser.add_argument("--plushie-confidence", type=float,
+                        help="teddy bear threshold; default from config/yolo_objects.yaml")
     parser.add_argument("--yolo-fps", type=float, default=15, help="maximum inference rate; latest frame only")
     parser.add_argument("--found-audio", action="store_true", help="opt-in reaction WAV after sustained G1 object detection")
     parser.add_argument("--found-duration", type=float, help="sustained person duration; default from person_found_audio.yaml")
@@ -82,7 +96,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audio-cooldown", type=float, help="audio re-trigger lockout in seconds")
     parser.add_argument("--rearm-absence", type=float, help="person must be absent this many seconds before rearming")
     parser.add_argument("--found-sound", help="existing WAV path; default: configured person reaction WAV")
-    parser.add_argument("--found-output", choices=("g1", "pc"), help="audio output; default G1 speaker")
+    parser.add_argument(
+        "--found-output",
+        choices=("g1", "pc", "mock"),
+        help="audio output; mock only logs playback, default G1 speaker",
+    )
+    parser.add_argument(
+        "--robot",
+        choices=("mock", "g1", "g1-ssh"),
+        default="mock",
+        help=(
+            "Reaction Engine robot adapter; g1-ssh runs the fixed notice in a "
+            "G1-local one-shot helper"
+        ),
+    )
+    parser.add_argument("--enable-real-robot", action="store_true")
+    parser.add_argument(
+        "--execute-real-action",
+        action="store_true",
+        help="first SSH-helper gate; G1_ALLOW_REAL_ACTION=1 is also required",
+    )
+    parser.add_argument(
+        "--g1-motion", choices=("disabled", "safe-actions"), default="disabled"
+    )
     parser.add_argument("--g1-stream-host", help="PC2 host publishing processed game images")
     parser.add_argument("--g1-stream-port", type=int, help="processed TeleImager ZMQ port")
     parser.add_argument(

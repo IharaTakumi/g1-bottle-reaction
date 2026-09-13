@@ -35,7 +35,7 @@ def test_existing_wav_player_uses_one_ssh_connection(monkeypatch, tmp_path):
         stream.setsampwidth(2)
         stream.setframerate(16000)
         stream.writeframes(b'\0\0' * 160)
-    output = G1SshAudioOutput('g1', '/tmp/test-control')
+    output = G1SshAudioOutput('unitree@10.42.0.76', '/tmp/test-control')
     output.chunk_delay_seconds = 0
     try:
         output.play_wav(wav)
@@ -44,6 +44,7 @@ def test_existing_wav_player_uses_one_ssh_connection(monkeypatch, tmp_path):
         assert len(commands) == 1 and output.process.pid == pid
         assert output.process.poll() is None
         assert 'BatchMode=yes' in commands[0] and '/tmp/test-control' in commands[0]
+        assert 'unitree@10.42.0.76' in commands[0]
         assert output.volume is None
     finally:
         output.close()

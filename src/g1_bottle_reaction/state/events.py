@@ -25,6 +25,9 @@ class ReactionEvent(str, Enum):
     RETURNED_TO_UNAWARE = "RETURNED_TO_UNAWARE"
     PLAYER_FOUND = "PLAYER_FOUND"
     GAME_OVER = "GAME_OVER"
+    YOLO_PERSON_FOUND = "YOLO_PERSON_FOUND"
+    YOLO_BANANA_FOUND = "YOLO_BANANA_FOUND"
+    YOLO_PLUSHIE_FOUND = "YOLO_PLUSHIE_FOUND"
 
 
 # Backward-compatible name retained for the existing bottle tracker and tests.

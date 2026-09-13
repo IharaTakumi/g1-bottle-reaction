@@ -1,13 +1,20 @@
-"""Small person debounce/cooldown and a single non-queuing audio worker."""
+"""YOLO confirmation gates and adapters for the shared Reaction Engine."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 import threading
 import wave
 
 import yaml
+
+from g1_bottle_reaction.adapters.robot import RobotAdapter
+from g1_bottle_reaction.adapters.speech import SpeechBackend
+from g1_bottle_reaction.config.loader import ReactionConfig
+from g1_bottle_reaction.reactions.engine import ReactionEngine, ReactionJob
+from g1_bottle_reaction.reactions.models import Reaction
+from g1_bottle_reaction.state.events import ReactionEvent
 
 
 @dataclass(frozen=True)
@@ -19,6 +26,153 @@ class FoundSettings:
     sounds: tuple[Path, ...]
     output: str
     rearm_absence: float
+
+
+FOUND_REACTION_EVENTS = {
+    "person": ReactionEvent.YOLO_PERSON_FOUND,
+    "banana": ReactionEvent.YOLO_BANANA_FOUND,
+    "plushie": ReactionEvent.YOLO_PLUSHIE_FOUND,
+}
+
+
+class ConsoleWavOutput:
+    """Hardware-free audio output for the dual-camera mock mode."""
+
+    def play_wav(self, path: Path) -> None:
+        print(f"[MOCK AUDIO] {path}", flush=True)
+
+    def close(self) -> None:
+        pass
+
+
+class FoundWavSpeechBackend(SpeechBackend):
+    """Adapt existing reaction WAV files to ReactionEngine's speech boundary."""
+
+    def __init__(self, output) -> None:
+        self.output = output
+        self.error = ""
+
+    def speak(self, text: str, *, voice_profile: str = "neutral") -> None:
+        del voice_profile
+        path = Path(text)
+        print(f"Audio triggered: {path}", flush=True)
+        try:
+            self.output.play_wav(path)
+        except Exception as exc:
+            self.error = str(exc)
+            print(
+                f"FOUND AUDIO ERROR: {exc}; camera/YOLO continue (audio disabled)",
+                flush=True,
+            )
+
+    def close(self) -> None:
+        close = getattr(self.output, "close", None)
+        if close:
+            close()
+
+
+class FailSafeReactionRobotAdapter(RobotAdapter):
+    """Log one named reaction and permanently inhibit motion after an exception."""
+
+    def __init__(self, delegate: RobotAdapter) -> None:
+        self.delegate = delegate
+        self.error = ""
+
+    def play_motion(self, motion: str) -> None:
+        if self.error:
+            print(
+                f"Motion reaction skipped: {motion} (disabled after previous error)",
+                flush=True,
+            )
+            return
+        print(f"Motion reaction triggered: {motion}", flush=True)
+        try:
+            self.delegate.play_motion(motion)
+            if getattr(self.delegate, "last_motion_timed_out", False):
+                raise RuntimeError(
+                    "Unitree safe Action returned RPC timeout 3104"
+                )
+        except Exception as exc:
+            self.error = str(exc)
+            print(
+                f"MOTION REACTION ERROR: {exc}; camera/YOLO continue "
+                "(motion disabled, no automatic retry)",
+                flush=True,
+            )
+
+    def request_shutdown(self) -> None:
+        self.delegate.request_shutdown()
+
+    def close(self) -> None:
+        self.delegate.close()
+
+
+class FoundReactionController:
+    """Submit confirmed YOLO events to the repository's shared ReactionEngine."""
+
+    def __init__(
+        self,
+        settings: dict[str, FoundSettings],
+        output,
+        robot: RobotAdapter,
+        *,
+        base_reaction: Reaction,
+        cooldown_seconds: float,
+    ) -> None:
+        if base_reaction.motion != "notice":
+            raise ValueError("Dual-camera G1 reaction is restricted to existing 'notice'")
+        items = {
+            FOUND_REACTION_EVENTS[name].value: replace(
+                base_reaction,
+                name=FOUND_REACTION_EVENTS[name].value,
+                speech=str(value.sounds[0]),
+                encounter_variants=(),
+                bypass_cooldown=False,
+            )
+            for name, value in settings.items()
+        }
+        self.speech = FoundWavSpeechBackend(output)
+        self.robot = FailSafeReactionRobotAdapter(robot)
+        self.engine = ReactionEngine(
+            ReactionConfig(cooldown_seconds=cooldown_seconds, items=items),
+            self.robot,
+            self.speech,
+        )
+        self._jobs: list[ReactionJob] = []
+
+    @property
+    def busy(self) -> bool:
+        self._jobs = [job for job in self._jobs if not job.wait(0)]
+        return bool(self._jobs)
+
+    @property
+    def audio_error(self) -> str:
+        return self.speech.error
+
+    @property
+    def motion_error(self) -> str:
+        return self.robot.error
+
+    def trigger(self, name: str, now: float) -> bool:
+        if name not in FOUND_REACTION_EVENTS:
+            raise ValueError(f"Unknown found reaction target: {name}")
+        decision = self.engine.handle(
+            FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
+        )
+        if decision.accepted and decision.job is not None:
+            self._jobs.append(decision.job)
+            print(
+                f"{name.upper()} REACTION EVENT: audio + "
+                f"motion={decision.reaction.motion}",
+                flush=True,
+            )
+        return decision.accepted
+
+    def close(self) -> None:
+        try:
+            self.engine.close(wait=True, cancel_pending=True)
+        finally:
+            self.speech.close()
 
 
 def load_settings(args, root):
@@ -59,6 +213,21 @@ def load_banana_settings(root, confidence, output):
     return FoundSettings(confidence, duration, grace, cooldown, (path,), output, absence)
 
 
+def load_plushie_settings(root, confidence, output):
+    with (root / "config/yolo_objects.yaml").open(encoding="utf-8") as stream:
+        values = yaml.safe_load(stream)
+    duration = float(values["plushie_found_duration"])
+    grace = float(values["plushie_dropout_grace"])
+    cooldown = float(values["plushie_audio_cooldown"])
+    absence = float(values["plushie_rearm_absence"])
+    if not all(math.isfinite(v) and v > 0 for v in (duration, grace, cooldown, absence)):
+        raise ValueError("plushie audio timing values must be finite and positive")
+    path = Path(values["plushie_sound"])
+    path = (path if path.is_absolute() else root / path).resolve()
+    validate_sound(path)
+    return FoundSettings(confidence, duration, grace, cooldown, (path,), output, absence)
+
+
 def validate_sound(path):
     try:
         with wave.open(str(path), "rb") as stream:
@@ -70,14 +239,21 @@ def validate_sound(path):
         raise ValueError(f"Cannot play existing WAV {path}: {exc}") from exc
 
 
-def select_audio_trigger(result, now, person_gate, banana_gate, *, audio_busy=False):
-    """Choose at most one reaction; a visible person always suppresses banana."""
+def select_audio_trigger(result, now, person_gate, banana_gate, plushie_gate=None, *, audio_busy=False):
+    """Choose at most one reaction in person, banana, plushie priority order."""
     if person_gate.update(result, now, audio_busy=audio_busy):
         banana_gate.update(result, now, audio_busy=True, inhibit=True)
+        if plushie_gate is not None:
+            plushie_gate.update(result, now, audio_busy=True, inhibit=True)
         return "person"
     if banana_gate.update(result, now, audio_busy=audio_busy,
                           inhibit=bool(result.people)):
+        if plushie_gate is not None:
+            plushie_gate.update(result, now, audio_busy=True, inhibit=True)
         return "banana"
+    if plushie_gate is not None and plushie_gate.update(
+            result, now, audio_busy=audio_busy, inhibit=bool(result.people or result.bananas)):
+        return "plushie"
     return None
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -19,8 +20,8 @@ minimal = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(minimal)
 
 
-def nic(name="cable0", wired=True, flags=None, address="10.42.0.2"):
-    return {"ifname": name, "wired": wired,
+def nic(name="cable0", wired=True, wireless=False, flags=None, address="10.42.0.2"):
+    return {"ifname": name, "wired": wired, "wireless": wireless,
             "flags": ["UP", "LOWER_UP"] if flags is None else flags,
             "addr_info": [{"family": "inet", "scope": "global", "local": address, "prefixlen": 24}]}
 
@@ -40,8 +41,16 @@ def test_select_wired_without_hardcoded_subnet():
         "cable0", ["10.42.0.2/24"])
 
 
+def test_dual_camera_helper_can_explicitly_select_wireless_interface():
+    wifi = nic("wifi0", wired=False, wireless=True, address="10.42.0.1")
+    assert minimal.select_interface(
+        [nic(), wifi], "wifi0", ipaddress.ip_address("10.42.0.76"),
+        allow_wireless=True,
+    ) == ("wifi0", ["10.42.0.1/24"])
+
+
 @pytest.mark.parametrize("interfaces,name", [
-    ([nic("wifi0", False)], "wifi0"),
+    ([nic("wifi0", False, True)], "wifi0"),
     ([nic(flags=["UP"])], None),
     ([nic(), nic("cable1")], None),
     ([nic()], "missing"),

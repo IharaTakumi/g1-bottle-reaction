@@ -1,4 +1,5 @@
-# Opt-in with --found-audio. No TTS synthesis or robot motion.
+# Opt-in with --found-audio. WAV stays pre-generated; motion comes from the
+# existing config/default.yaml FOUND reaction and is restricted to "notice".
 # Confidence uses the existing --yolo-confidence option (default 0.25).
 found_duration: 0.3
 dropout_grace: 0.15

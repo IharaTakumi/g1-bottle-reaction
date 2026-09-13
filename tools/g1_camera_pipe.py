@@ -2,6 +2,7 @@
 """Isolated G1 SDK or local GStreamer reader; stdout carries framed images."""
 import argparse
 import contextlib
+import ipaddress
 import os
 from pathlib import Path
 import resource
@@ -21,7 +22,12 @@ def g1(args):
 
     output = sys.stdout.buffer
     with contextlib.redirect_stdout(sys.stderr):
-        nic, ips = select_interface(inspect_interfaces(), args.interface)
+        nic, ips = select_interface(
+            inspect_interfaces(), args.interface, args.g1_ip, allow_wireless=True
+        )
+        if args.g1_ip is not None:
+            from g1_camera_minimal import verify_route
+            verify_route(args.g1_ip, nic)
         print("G1 NIC:", nic, "IP:", ips, flush=True)
         source = G1CameraSource(nic, timeout_seconds=0.5, read_attempts=1, runtime=CameraRuntime())
         last = time.monotonic()
@@ -48,7 +54,7 @@ def g1(args):
             source.close()
 
 
-def usb(args):
+def rtp(args):
     import gi
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst
@@ -63,7 +69,8 @@ def usb(args):
     jitter = pipeline.get_by_name("jitter")
     bus = pipeline.get_bus()
     pipeline.set_state(Gst.State.PLAYING)
-    print("USB receiver: RTP/JPEG, UDP %s:%d, jitter=30ms, appsink=1" % (args.bind, args.port), file=sys.stderr, flush=True)
+    print("%s receiver: RTP/JPEG, UDP %s:%d, jitter=30ms, appsink=1" %
+          (args.label, args.bind, args.port), file=sys.stderr, flush=True)
     try:
         while True:
             error = bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
@@ -83,10 +90,12 @@ def usb(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("source", choices=("g1", "usb"))
+    p.add_argument("source", choices=("g1", "usb", "rtp"))
     p.add_argument("--interface")
+    p.add_argument("--g1-ip", type=ipaddress.IPv4Address)
     p.add_argument("--bind", default="127.0.0.1")
     p.add_argument("--port", type=int, default=56000)
+    p.add_argument("--label", default="USB")
     args = p.parse_args()
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if args.source == "g1":
@@ -96,7 +105,7 @@ def main():
             os.environ["CYCLONEDDS_HOME"] = str(native)
         g1(args)
     else:
-        usb(args)
+        rtp(args)
 
 
 if __name__ == "__main__":

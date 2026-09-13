@@ -9,8 +9,9 @@ import pytest
 from g1_bottle_reaction.game_vision.app import build_parser, main
 from g1_bottle_reaction.game_vision.dual import FrameState, compose, validate_args
 from g1_bottle_reaction.game_vision.person_yolo import (
-    Banana, Detection, Person, PersonWorker, TransitionLogger, filter_bananas,
-    filter_people, load_banana_confidence, visible_detection,
+    Banana, Detection, Person, PersonWorker, Plushie, TransitionLogger, filter_bananas,
+    filter_people, filter_plushies, load_banana_confidence, load_plushie_confidence,
+    visible_detection,
 )
 
 
@@ -40,13 +41,30 @@ def test_banana_confidence_config_and_override():
     assert load_banana_confidence(args, root) == .42
 
 
+def test_plushie_uses_coco_teddy_bear_class_and_configured_confidence():
+    rows = [[1, 2, 30, 40, .24, 77], [4, 5, 60, 70, .25, 77],
+            [8, 9, 80, 90, .9, 46], [1, 2, 30, 40, float('inf'), 77]]
+    plushies = filter_plushies(rows, .25)
+    assert len(plushies) == 1 and plushies[0].confidence == .25
+    assert len(filter_bananas(rows, .25)) == 1
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    args = build_parser().parse_args(['--source', 'dual'])
+    assert load_plushie_confidence(args, root) == .25
+    args = build_parser().parse_args(['--source', 'dual', '--plushie-confidence', '.42'])
+    assert load_plushie_confidence(args, root) == .42
+
+
 def test_stale_results_and_lost_camera_clear_detection():
     result = Detection((Person((1, 2, 10, 20), .6),), stamp=10, status="RUNNING",
-                       bananas=(Banana((2, 3, 8, 9), .7),))
+                       bananas=(Banana((2, 3, 8, 9), .7),),
+                       plushies=(Plushie((3, 4, 9, 10), .8),))
     assert visible_detection(result, True, 10.2).people
     assert visible_detection(result, True, 10.2).bananas
+    assert visible_detection(result, True, 10.2).plushies
     assert not visible_detection(result, True, 10.6).people
     assert not visible_detection(result, True, 10.6).bananas
+    assert not visible_detection(result, True, 10.6).plushies
     assert visible_detection(result, False, 10.1).status == "STALE"
 
 
@@ -95,6 +113,15 @@ def test_banana_box_has_distinct_color():
     assert tuple(out[78 + 200, 200]) == (255, 80, 255)
 
 
+def test_plushie_box_has_distinct_color():
+    frame = np.zeros((360, 640, 3), np.uint8)
+    state = FrameState(frame=frame, stamp=10, error='')
+    result = Detection(stamp=10, shape=(360, 640), status='RUNNING',
+                       plushies=(Plushie((100, 40, 300, 200), .8),))
+    out = compose({'g1': state}, 'dual', 10.1, detection=result)
+    assert tuple(out[78 + 200, 200]) == (80, 180, 255)
+
+
 def test_transition_logs_only_changes_not_every_confidence():
     logger = TransitionLogger()
     none = Detection(status="RUNNING")
@@ -116,10 +143,22 @@ def test_banana_transition_logs_without_person_event():
     assert 'BANANA LOST' in logger.update(none)
 
 
+def test_plushie_transition_logs_without_other_object_event():
+    logger = TransitionLogger()
+    none = Detection(status='RUNNING')
+    plushie = Detection(status='RUNNING', plushies=(Plushie((1, 2, 10, 20), .6),))
+    assert logger.update(none) is None
+    assert 'PLUSHIE DETECTED' in logger.update(plushie)
+    assert logger.update(plushie) is None
+    assert 'PLUSHIE LOST' in logger.update(none)
+
+
 @pytest.mark.parametrize('args', [ ['--yolo-confidence', 'nan'], ['--yolo-confidence', '0'],
                                   ['--yolo-confidence', '1.1'], ['--yolo-fps', '0'],
                                   ['--yolo-fps', 'inf'], ['--banana-confidence', '0'],
-                                  ['--banana-confidence', 'nan'], ['--banana-confidence', '1.1'] ])
+                                  ['--banana-confidence', 'nan'], ['--banana-confidence', '1.1'],
+                                  ['--plushie-confidence', '0'], ['--plushie-confidence', 'nan'],
+                                  ['--plushie-confidence', '1.1'] ])
 def test_invalid_yolo_cli(args):
     with pytest.raises(ValueError):
         validate_args(build_parser().parse_args(['--source', 'dual'] + args))
@@ -139,7 +178,8 @@ def slow_fake_process(connection, options):
             time.sleep(.16)
             # Echo frame number in confidence, to verify latest source selection.
             value = float(frame[0, 0, 0]) / 255
-            connection.send(('result', [[1, 2, 10, 20, value, 0]], 160.0))
+            connection.send(('result', [[1, 2, 10, 20, value, 0],
+                                        [2, 3, 11, 21, value, 77]], 160.0))
     except (EOFError, BrokenPipeError):
         pass
 
@@ -181,6 +221,7 @@ def test_slow_process_latest_only_toggle_and_crash_isolation(tmp_path):
         wait_until(lambda: worker.snapshot().status == 'RUNNING')
         assert reads[:2] == [1, 100]  # No 99-frame backlog.
         assert worker.snapshot().people[0].confidence == pytest.approx(200/255)
+        assert worker.snapshot().plushies[0].confidence == pytest.approx(200/255)
         worker.process.terminate()
         with lock:
             current.count = 101

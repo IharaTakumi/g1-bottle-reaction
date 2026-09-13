@@ -58,5 +58,8 @@ class RobotAdapter(ABC):
         del motion, timeout
         return False
 
+    def request_shutdown(self) -> None:
+        """Prevent new motion starts while allowing in-flight safety cleanup."""
+
     def close(self) -> None:
         """Release robot-side resources."""

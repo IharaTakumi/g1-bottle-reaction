@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -33,6 +34,10 @@ class ReactionLifecycleState(str, Enum):
 
 
 class ReactionCompletionError(RuntimeError):
+    pass
+
+
+class ReactionCancelledError(RuntimeError):
     pass
 
 
@@ -118,6 +123,13 @@ class ReactionEngine:
         self._lock = threading.Lock()
         self._decision_lock = threading.Lock()
         self._last_error: Exception | None = None
+        self._shutdown_requested = threading.Event()
+        # One persistent worker is sufficient because ReactionEngine serializes
+        # jobs.  The existing reaction worker remains the motion branch.
+        self._audio_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="reaction-audio"
+        )
+        self._audio_executor_closed = False
         if start_worker:
             self._worker = threading.Thread(
                 target=self._run, name="reaction-worker", daemon=True
@@ -146,6 +158,8 @@ class ReactionEngine:
     ) -> ReactionDecision:
         reaction = self.resolve(event, encounter_count)
         with self._decision_lock:
+            if self._shutdown_requested.is_set():
+                return ReactionDecision(accepted=False, reaction=reaction)
             within_cooldown = now - self._last_reaction_at < self.config.cooldown_seconds
             if (
                 within_cooldown
@@ -168,13 +182,58 @@ class ReactionEngine:
         if self._worker is None:
             self._execute_job(job, raise_errors=True)
         else:
-            self._queue.put(job)
+            # Serialize the final shutdown check with pending-queue cancellation.
+            with self._decision_lock:
+                if self._shutdown_requested.is_set():
+                    job._mark_failed(
+                        ReactionCancelledError("Reaction cancelled during shutdown")
+                    )
+                    return ReactionDecision(
+                        accepted=False, reaction=reaction, job=job
+                    )
+                self._queue.put(job)
         return ReactionDecision(accepted=True, reaction=reaction, job=job)
+
+    def _raise_if_shutdown_requested(self) -> None:
+        if self._shutdown_requested.is_set():
+            raise ReactionCancelledError("Reaction cancelled during shutdown")
+
+    def _submit_speech(self, reaction: Reaction) -> Future[None] | None:
+        if not reaction.speech:
+            return None
+
+        entered = threading.Event()
+
+        def speak() -> None:
+            # Let the reaction worker know that the fixed audio worker has
+            # accepted this branch before it starts the physical motion branch.
+            entered.set()
+            if reaction.speech_delay_seconds:
+                self._sleep(reaction.speech_delay_seconds)
+            self._raise_if_shutdown_requested()
+            self.speech.speak(
+                reaction.speech, voice_profile=reaction.voice_profile
+            )
+
+        future = self._audio_executor.submit(speak)
+        entered.wait()
+        return future
+
+    @staticmethod
+    def _future_error(future: Future[None] | None) -> Exception | None:
+        if future is None:
+            return None
+        try:
+            future.result()
+        except Exception as exc:
+            return exc
+        return None
 
     def _execute_outputs(self, reaction: Reaction) -> None:
         with self._lock:
             self._current = reaction
         try:
+            self._raise_if_shutdown_requested()
             if reaction.motion == "custom_notice":
                 started = self._clock()
                 if self.config.timeline_debug:
@@ -185,11 +244,13 @@ class ReactionEngine:
                     timing_debug=self.config.timeline_debug,
                 )
                 if reaction.speech and motion_started:
+                    self._raise_if_shutdown_requested()
                     remaining = reaction.speech_delay_seconds - (
                         self._clock() - started
                     )
                     if remaining > 0:
                         self._sleep(remaining)
+                    self._raise_if_shutdown_requested()
                     elapsed = self._clock() - started
                     if self.config.timeline_debug:
                         LOGGER.info("[SPEECH] requested t=%.3f", elapsed)
@@ -206,12 +267,35 @@ class ReactionEngine:
                         ),
                     )
             else:
-                self.robot.play_motion(reaction.motion)
-                if reaction.speech:
-                    self._sleep(reaction.speech_delay_seconds)
-                    self.speech.speak(
-                        reaction.speech, voice_profile=reaction.voice_profile
-                    )
+                # Start both outputs from the same accepted job.  Speech uses a
+                # fixed single-worker executor while the existing reaction
+                # worker owns motion and all robot-side safety cleanup.
+                audio_future = None
+                audio_error = None
+                try:
+                    audio_future = self._submit_speech(reaction)
+                except Exception as exc:
+                    # Even failure to submit the audio branch must not prevent
+                    # a requested robot reaction from reaching its cleanup.
+                    audio_error = exc
+                motion_error = None
+                try:
+                    self._raise_if_shutdown_requested()
+                    self.robot.play_motion(reaction.motion)
+                except Exception as exc:
+                    motion_error = exc
+                if audio_error is None:
+                    audio_error = self._future_error(audio_future)
+                if motion_error is not None:
+                    if audio_error is not None:
+                        LOGGER.error(
+                            "Reaction audio also failed after motion error: %s",
+                            audio_error,
+                        )
+                    raise motion_error
+                if audio_error is not None:
+                    raise audio_error
+                self._raise_if_shutdown_requested()
         finally:
             with self._lock:
                 self._current = None
@@ -243,7 +327,10 @@ class ReactionEngine:
             with self._lock:
                 self._last_error = exc
                 self._current = None
-            LOGGER.exception("Reaction '%s' failed", job.reaction.name)
+            if isinstance(exc, ReactionCancelledError):
+                LOGGER.info("Reaction '%s' cancelled during shutdown", job.reaction.name)
+            else:
+                LOGGER.exception("Reaction '%s' failed", job.reaction.name)
             if observer is not None:
                 try:
                     observer.on_failed(job, exc)
@@ -272,12 +359,37 @@ class ReactionEngine:
             finally:
                 self._queue.task_done()
 
-    def close(self, *, wait: bool = True) -> None:
+    def _cancel_pending_jobs(self) -> None:
+        while True:
+            try:
+                job = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if job is not None:
+                    job._mark_failed(
+                        ReactionCancelledError("Reaction cancelled during shutdown")
+                    )
+            finally:
+                self._queue.task_done()
+
+    def close(self, *, wait: bool = True, cancel_pending: bool = False) -> None:
         if self._worker is not None:
+            if cancel_pending:
+                self._shutdown_requested.set()
+                self.robot.request_shutdown()
+                with self._decision_lock:
+                    self._cancel_pending_jobs()
             if wait:
                 self._queue.join()
             self._queue.put(None)
             if wait:
                 self._worker.join(timeout=5)
             self._worker = None
+        if not self._audio_executor_closed:
+            self._audio_executor.shutdown(
+                wait=wait,
+                cancel_futures=cancel_pending,
+            )
+            self._audio_executor_closed = True
         self.robot.close()

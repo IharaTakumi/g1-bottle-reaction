@@ -111,6 +111,382 @@ def serve_remote_cached_audio():
             with contextlib.redirect_stdout(sys.stderr):
                 client.PlayStop(app)
 
+
+def serve_remote_camera_sender():
+    """G1-local VideoClient to RTP/JPEG bridge, streamed over SSH source only.
+
+    This Python 3.8-compatible helper is sent to PC2 with ``python3 -c``. It
+    reads the existing camera service and owns only the GStreamer process it
+    starts. No robot-control client or command is imported.
+    """
+    import argparse
+    import contextlib
+    import json
+    import os
+    import resource
+    import select
+    import shutil
+    import signal
+    import subprocess
+    import sys
+    import time
+    import xml.etree.ElementTree as ET
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dest", required=True)
+    parser.add_argument("--bind", required=True)
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument("--duration", type=float, default=3600.0)
+    args = parser.parse_args()
+    if not 1024 <= args.port <= 65535 or not 0 < args.fps <= 60 or args.duration <= 0:
+        raise ValueError("invalid G1 camera sender port, FPS or duration")
+    if not shutil.which("gst-launch-1.0"):
+        raise RuntimeError("existing GStreamer is required on G1")
+
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    os.environ.pop("CYCLONEDDS_URI", None)
+    process = client = None
+    frames = errors = sent_bytes = 0
+    started = last_frame = time.monotonic()
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            import unitree_sdk2py.core.channel as channel
+            from unitree_sdk2py.go2.video.video_client import VideoClient
+
+            original = channel.ChannelConfigHasInterface
+            root = ET.fromstring(original)
+            for parent in root.iter():
+                for child in list(parent):
+                    if child.tag == "Tracing":
+                        parent.remove(child)
+            channel.ChannelConfigHasInterface = ET.tostring(root, encoding="unicode")
+            try:
+                channel.ChannelFactoryInitialize(0, "eth0")
+            finally:
+                channel.ChannelConfigHasInterface = original
+            client = VideoClient()
+            client.SetTimeout(0.5)
+            client.Init()
+
+        command = [
+            "gst-launch-1.0", "-q", "fdsrc", "fd=0", "do-timestamp=true",
+            "blocksize=1048576", "!", "jpegparse", "!", "rtpjpegpay",
+            "pt=26", "mtu=1200", "!", "udpsink", "host=" + args.dest,
+            "bind-address=" + args.bind, "port=" + str(args.port),
+            "sync=false", "async=false",
+        ]
+        env = dict(os.environ, GST_REGISTRY="/dev/null", GST_REGISTRY_UPDATE="no")
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, env=env)
+        print(json.dumps({"status": "ready", "transport": "RTP/JPEG",
+                          "dest": args.dest, "bind": args.bind, "port": args.port}), flush=True)
+        next_frame = time.monotonic()
+        last_report = next_frame
+        while time.monotonic() - started < args.duration:
+            if process.poll() is not None:
+                raise RuntimeError("GStreamer RTP sender exited: %s" % process.returncode)
+            if select.select([sys.stdin], [], [], 0)[0]:
+                sys.stdin.readline()
+                break
+            now = time.monotonic()
+            if now < next_frame:
+                time.sleep(min(0.01, next_frame - now))
+                continue
+            next_frame = now + 1.0 / args.fps
+            result = client.GetImageSample()
+            if not isinstance(result, tuple) or len(result) != 2:
+                errors += 1
+                continue
+            code, data = result
+            if code != 0:
+                errors += 1
+                if time.monotonic() - last_frame > 5:
+                    raise RuntimeError("VideoClient.GetImageSample failed: %s" % code)
+                continue
+            payload = bytes(data)
+            if len(payload) < 4 or payload[:2] != b"\xff\xd8":
+                errors += 1
+                continue
+            process.stdin.write(payload)
+            process.stdin.flush()
+            frames += 1
+            sent_bytes += len(payload)
+            last_frame = time.monotonic()
+            if last_frame - last_report >= 5:
+                elapsed = last_frame - started
+                print("G1 CAMERA SENDER: frames=%d fps=%.1f bytes=%d errors=%d" % (
+                    frames, frames / elapsed if elapsed else 0.0, sent_bytes, errors), flush=True)
+                last_report = last_frame
+    finally:
+        if process is not None:
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+        elapsed = time.monotonic() - started
+        print("G1 CAMERA SENDER STOPPED: frames=%d fps=%.1f errors=%d" % (
+            frames, frames / elapsed if elapsed else 0.0, errors), flush=True)
+
+
+def g1_local_safe_action_main(
+    argv=None,
+    *,
+    dependencies=None,
+    environ=None,
+    output=None,
+    shutdown_event=None,
+    hold_wait=None,
+    install_signal_handlers=True,
+):
+    """Run one fixed G1-local Arm Action operation and emit one JSON result.
+
+    The function is deliberately self-contained and Python 3.8-compatible so
+    its trusted source can be passed to ``python3 -c`` over SSH.  Tests inject
+    fake SDK dependencies; production imports the already-installed G1 SDK.
+    No external Action ID or arbitrary command is accepted.
+    """
+    import argparse
+    import contextlib
+    import json
+    import os
+    import resource
+    import signal
+    import sys
+    import threading
+    import time
+    import xml.etree.ElementTree as ET
+
+    result_prefix = "G1_SAFE_ACTION_RESULT="
+    action23_id = 23
+    action99_id = 99
+    expected_names = {23: "right_hand_up", 99: "release_arm"}
+    rpc_timeout_seconds = 10.0
+    hold_seconds = 2.0
+
+    parser = argparse.ArgumentParser(
+        description="G1-local fixed safe Action helper"
+    )
+    parser.add_argument("operation", choices=("probe", "notice"))
+    parser.add_argument("--execute-real-action", action="store_true")
+    args = parser.parse_args(argv)
+
+    environment = os.environ if environ is None else environ
+    emit = print if output is None else output
+    stop_requested = shutdown_event or threading.Event()
+    wait_for_stop = hold_wait or stop_requested.wait
+    state = {
+        "ok": False,
+        "operation": args.operation,
+        "dds_initialized": False,
+        "action_list_ok": False,
+        "action23_available": False,
+        "action99_available": False,
+        "action23_invoked": False,
+        "action23_code": None,
+        "action99_invoked": False,
+        "action99_code": None,
+        "motion_uncertain": False,
+        "error": "",
+    }
+    client = None
+    arm_may_be_active = False
+    previous_handlers = {}
+
+    def request_stop(signum, frame):
+        del signum, frame
+        stop_requested.set()
+
+    def result_code(value):
+        if isinstance(value, tuple) and value:
+            return value[0]
+        return value
+
+    def normalized_name(value):
+        return str(value).strip().lower().replace("-", "_").replace(" ", "_")
+
+    def collect_actions(value, found):
+        if isinstance(value, dict):
+            action_id = None
+            for key in ("id", "action_id", "actionId"):
+                if key in value:
+                    try:
+                        action_id = int(value[key])
+                    except (TypeError, ValueError):
+                        action_id = None
+                    break
+            if action_id is not None:
+                name = value.get("name", value.get("label", ""))
+                found.setdefault(action_id, set()).add(normalized_name(name))
+            for key, item in value.items():
+                if isinstance(item, int) and not isinstance(item, bool):
+                    key_name = normalized_name(key)
+                    if key_name in expected_names.values():
+                        found.setdefault(int(item), set()).add(key_name)
+                collect_actions(item, found)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect_actions(item, found)
+
+    def record_error(message):
+        message = str(message)
+        if state["error"]:
+            state["error"] += "; " + message
+        else:
+            state["error"] = message
+
+    try:
+        if args.operation == "notice" and not (
+            args.execute_real_action
+            and environment.get("G1_ALLOW_REAL_ACTION") == "1"
+        ):
+            raise RuntimeError(
+                "notice requires both --execute-real-action and "
+                "G1_ALLOW_REAL_ACTION=1"
+            )
+
+        if install_signal_handlers and threading.current_thread() is threading.main_thread():
+            for signal_name in ("SIGINT", "SIGTERM", "SIGHUP"):
+                sig = getattr(signal, signal_name, None)
+                if sig is not None:
+                    previous_handlers[sig] = signal.getsignal(sig)
+                    signal.signal(sig, request_stop)
+
+        if dependencies is None:
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        if environ is None:
+            os.environ.pop("CYCLONEDDS_URI", None)
+
+        with contextlib.redirect_stdout(sys.stderr):
+            if dependencies is None:
+                import unitree_sdk2py.core.channel as channel
+                from unitree_sdk2py.g1.arm.g1_arm_action_client import (
+                    G1ArmActionClient,
+                )
+                client_factory = G1ArmActionClient
+            else:
+                channel, client_factory = dependencies
+
+            original_config = getattr(channel, "ChannelConfigHasInterface", None)
+            if original_config is not None:
+                root = ET.fromstring(original_config)
+                for parent in root.iter():
+                    for child in list(parent):
+                        if child.tag == "Tracing":
+                            parent.remove(child)
+                channel.ChannelConfigHasInterface = ET.tostring(
+                    root, encoding="unicode"
+                )
+            try:
+                channel.ChannelFactoryInitialize(0, "eth0")
+            finally:
+                if original_config is not None:
+                    channel.ChannelConfigHasInterface = original_config
+            state["dds_initialized"] = True
+
+            client = client_factory()
+            client.SetTimeout(rpc_timeout_seconds)
+            client.Init()
+            list_result = client.GetActionList()
+
+        if not isinstance(list_result, tuple) or len(list_result) < 2:
+            raise RuntimeError("GetActionList returned an invalid response")
+        list_code, payload = list_result[0], list_result[1]
+        if list_code != 0:
+            raise RuntimeError(
+                "GetActionList failed with return code %s" % list_code
+            )
+        actions = {}
+        collect_actions(payload, actions)
+        state["action23_available"] = (
+            expected_names[action23_id] in actions.get(action23_id, set())
+        )
+        state["action99_available"] = (
+            expected_names[action99_id] in actions.get(action99_id, set())
+        )
+        state["action_list_ok"] = (
+            state["action23_available"] and state["action99_available"]
+        )
+        if not state["action_list_ok"]:
+            raise RuntimeError(
+                "GetActionList is missing verified Action 23/right_hand_up "
+                "or 99/release_arm"
+            )
+
+        if args.operation == "probe":
+            state["ok"] = True
+        else:
+            if stop_requested.is_set():
+                raise RuntimeError("shutdown requested before Action 23")
+            # From this boundary onward, even an exception or timeout means the
+            # arm may have received Action 23 and therefore requires release.
+            arm_may_be_active = True
+            state["action23_invoked"] = True
+            state["motion_uncertain"] = True
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    action23_result = client.ExecuteAction(action23_id)
+                state["action23_code"] = result_code(action23_result)
+            except Exception as exc:
+                record_error("ExecuteAction(23) exception: %s" % exc)
+            else:
+                if state["action23_code"] != 0:
+                    record_error(
+                        "ExecuteAction(23) failed with return code %s"
+                        % state["action23_code"]
+                    )
+                else:
+                    state["motion_uncertain"] = False
+                    interrupted = bool(wait_for_stop(hold_seconds))
+                    if interrupted or stop_requested.is_set():
+                        record_error("shutdown requested after Action 23")
+    except KeyboardInterrupt:
+        stop_requested.set()
+        record_error("KeyboardInterrupt")
+    except Exception as exc:
+        record_error("%s: %s" % (type(exc).__name__, exc))
+    finally:
+        if arm_may_be_active and client is not None and not state["action99_invoked"]:
+            state["action99_invoked"] = True
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    action99_result = client.ExecuteAction(action99_id)
+                state["action99_code"] = result_code(action99_result)
+                if state["action99_code"] != 0:
+                    state["motion_uncertain"] = True
+                    record_error(
+                        "ExecuteAction(99) failed with return code %s"
+                        % state["action99_code"]
+                    )
+            except Exception as exc:
+                state["motion_uncertain"] = True
+                record_error("ExecuteAction(99) exception: %s" % exc)
+
+        if args.operation == "notice":
+            state["ok"] = bool(
+                state["action_list_ok"]
+                and state["action23_invoked"]
+                and state["action23_code"] == 0
+                and state["action99_invoked"]
+                and state["action99_code"] == 0
+                and not state["error"]
+            )
+        for sig, previous in previous_handlers.items():
+            signal.signal(sig, previous)
+        emit(result_prefix + json.dumps(state, sort_keys=True, separators=(",", ":")))
+    return state
+
 ARM_ACTION_RPC_TIMEOUT_CODE = 3104
 ARM_RELEASE_ACTION_ID = 99
 
@@ -572,6 +948,9 @@ class G1RobotAdapter(RobotAdapter):
         self._preset_completion_unconfirmed = False
         self._last_motion_name: str | None = None
         self._last_motion_started = False
+        self._last_motion_timed_out = False
+        self._shutdown_requested = threading.Event()
+        self._motion_start_lock = threading.Lock()
 
     @property
     def motion_enabled(self) -> bool:
@@ -657,6 +1036,7 @@ class G1RobotAdapter(RobotAdapter):
     ) -> bool:
         self._last_motion_name = motion
         self._last_motion_started = False
+        self._last_motion_timed_out = False
         if motion == "custom_notice":
             if not self.motion_enabled or not self.custom_motion_enabled:
                 LOGGER.warning(
@@ -702,22 +1082,39 @@ class G1RobotAdapter(RobotAdapter):
         if not self._ownership.acquire("preset"):
             LOGGER.warning("Preset G1 arm action skipped because arm control is busy")
             return False
+        action_sent = False
+        release_sent = False
         try:
             # TODO: subscribe to rt/arm/action/state to confirm action start/completion.
-            result = self._arm_action_client.ExecuteAction(action.action_id)
+            with self._motion_start_lock:
+                if self._shutdown_requested.is_set():
+                    LOGGER.warning(
+                        "G1 motion '%s' skipped because shutdown was requested", motion
+                    )
+                    return False
+                action_sent = True
+                result = self._arm_action_client.ExecuteAction(action.action_id)
             ensure_arm_action_result(result, action)
-            self._preset_completion_unconfirmed = (
+            self._last_motion_timed_out = (
                 unitree_result_code(result) == ARM_ACTION_RPC_TIMEOUT_CODE
-                or not action.requires_release
+            )
+            self._preset_completion_unconfirmed = (
+                self._last_motion_timed_out or not action.requires_release
             )
             if action.requires_release:
                 self._sleeper(self.release_delay_seconds)
+                release_sent = True
                 release_result = self._arm_action_client.ExecuteAction(
                     ARM_RELEASE_ACTION_ID
                 )
                 ensure_arm_action_result(
                     release_result,
                     ArmActionSpec(ARM_RELEASE_ACTION_ID, "release arm"),
+                )
+                self._last_motion_timed_out = (
+                    self._last_motion_timed_out
+                    or unitree_result_code(release_result)
+                    == ARM_ACTION_RPC_TIMEOUT_CODE
                 )
                 # A successful release cannot prove that a timed-out action
                 # reached its intended physical completion boundary.
@@ -727,9 +1124,44 @@ class G1RobotAdapter(RobotAdapter):
                     == ARM_ACTION_RPC_TIMEOUT_CODE
                 )
         finally:
+            if (
+                action.requires_release
+                and action_sent
+                and not release_sent
+                and self._shutdown_requested.is_set()
+            ):
+                try:
+                    release_sent = True
+                    release_result = self._arm_action_client.ExecuteAction(
+                        ARM_RELEASE_ACTION_ID
+                    )
+                    ensure_arm_action_result(
+                        release_result,
+                        ArmActionSpec(ARM_RELEASE_ACTION_ID, "release arm"),
+                    )
+                    self._last_motion_timed_out = (
+                        self._last_motion_timed_out
+                        or unitree_result_code(release_result)
+                        == ARM_ACTION_RPC_TIMEOUT_CODE
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Best-effort G1 Action 99 release failed during shutdown"
+                    )
             self._ownership.release("preset")
         self._last_motion_started = True
         return True
+
+    @property
+    def last_motion_timed_out(self) -> bool:
+        return self._last_motion_timed_out
+
+    def request_shutdown(self) -> None:
+        # play_motion_timed checks this again at the ExecuteAction(23) boundary.
+        # An already-started notice still proceeds to its one release Action 99.
+        self._shutdown_requested.set()
+        with self._motion_start_lock:
+            pass
 
     def apply_tracking(self, command: TrackingCommand) -> None:
         # Phase 1 deliberately does not translate tracking yaw into real motion.
