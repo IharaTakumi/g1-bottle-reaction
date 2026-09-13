@@ -70,6 +70,13 @@ def test_source_stamp_preserves_zero_and_rejects_missing_stamp():
     assert stamp({'header': None}) is None
 
 
+def test_probe_selects_interface_in_process_without_changing_base_config():
+    base = (ROOT / 'config/g1-readonly-dds.xml').read_text()
+    configured = PROBE['config_for_interface'](base, 'wifi-test')
+    assert 'name="wifi-test"' in configured
+    assert 'name="enp129s0"' in base
+
+
 def test_probe_has_no_application_writer_or_rpc_entrypoint():
     tree = ast.parse(SCRIPT.read_text())
     forbidden = {'DataWriter', 'Publisher', 'ChannelPublisher', 'Client',

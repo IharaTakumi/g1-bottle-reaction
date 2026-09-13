@@ -67,6 +67,16 @@ def test_stdin_probe_is_standalone_and_has_no_write_or_rpc_execution():
     assert '_Call' not in attrs
 
 
+def test_pc2_doctor_percentile_is_nearest_rank():
+    spec = importlib.util.spec_from_file_location(
+        'pc2_doctor', ROOT / 'scripts/g1-pc2-doctor.py')
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    assert doctor.percentile([4, 1, 3, 2], 0.5) == 2
+    assert doctor.percentile([4, 1, 3, 2], 0.99) == 4
+    assert doctor.percentile([], 0.95) is None
+
+
 @pytest.mark.parametrize('api_id', [1801, 1802, 1804])
 def test_sdk_factory_registers_only_requested_api_and_restores_memory_config(monkeypatch, api_id):
     import sys

@@ -448,3 +448,17 @@ python -m pytest
 ## 共有Ubuntu PCでの動画→G1腕モーション生成
 
 既存G1環境と分離したproject-local micromamba環境を使います。初回は `bash tools/reaction_generator/setup_ubuntu.sh`、診断は `python3 tools/reaction_generator/doctor.py`。モデル配置、GVHMR→GMRの単体確認、生成、削除は [Ubuntu手順](tools/reaction_generator/README_UBUNTU.md) を参照してください。
+
+## G1完全無線接続（Ubuntu Hotspot）
+
+1. Ubuntu起動
+2. 必要ならスマホUSBテザリング
+3. `~/bin/g1-wireless-up`
+4. G1起動
+5. `G1 wireless ready`を待つ
+6. 表示されたコマンドでSSH
+
+Hotspotの停止だけを行う場合は`~/bin/g1-wireless-down`を実行します。Ubuntu側の
+`g1-teleop-ap`は手動起動のままです。G1 PC2は`g1-teleop-client`へ自動接続します。
+この管理Wi-FiからUbuntu direct DDSは使用せず、DDS / SLAMはG1 PC2上の
+`eth0`（`192.168.123.164/24`）/ domain 0で実行します。

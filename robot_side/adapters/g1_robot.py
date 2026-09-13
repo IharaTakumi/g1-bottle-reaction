@@ -54,6 +54,19 @@ class UnitreeSdkRuntime:
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
         return LowState_
 
+    def load_readonly_navigation_types(self):
+        """Load telemetry schemas only; do not initialize channels or RPC clients."""
+        configure_sdk_path()
+        from unitree_sdk2py.idl.nav_msgs.msg.dds_ import OccupancyGrid_, Odometry_
+        from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
+        from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+        return {
+            'occupancy_grid': OccupancyGrid_,
+            'odometry': Odometry_,
+            'point_cloud': PointCloud2_,
+            'string': String_,
+        }
+
     def create_slam_single_call_client(self, interface, timeout, api_id):
         if interface != 'eth0' or api_id not in (1801, 1802, 1804):
             raise ValueError('Only PC2 eth0 and single SLAM operations are supported')

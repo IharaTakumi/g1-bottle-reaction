@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Listen to domain-0 SPDP multicast on G1 Ethernet; never send a datagram.
+"""Listen to domain-0 SPDP multicast on a selected G1 interface; never send a datagram.
 
 Only RTPS packet headers and source addresses are recorded, not payloads.
 This identifies network origin of participant GUID prefixes, not remote PIDs.
@@ -21,12 +21,14 @@ def rtps_identity(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seconds', type=float, default=25)
+    parser.add_argument('--interface', default='enp129s0',
+                        help='Existing interface; does not configure it')
     parser.add_argument('--local-ip', type=ipaddress.IPv4Address, default='192.168.123.99',
-                        help='Existing enp129s0 IPv4 address; does not configure the interface')
+                        help='Existing interface IPv4 address; does not configure the interface')
     args = parser.parse_args()
     if not 0 < args.seconds <= 60:
         parser.error('--seconds must be in (0, 60]')
-    interface = 'enp129s0'
+    interface = args.interface
     local_ip = str(args.local_ip)
     ifindex = socket.if_nametoindex(interface)
     membership = socket.inet_aton('239.255.0.1') + socket.inet_aton(local_ip) + ifindex.to_bytes(4, 'little')

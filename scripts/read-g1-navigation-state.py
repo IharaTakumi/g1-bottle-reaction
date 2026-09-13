@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Receive allowlisted navigation telemetry; no application writers or RPCs.
 
-DDS discovery and acknowledgement traffic is necessary. Network/domain are fixed
-by config/g1-readonly-dds.xml. No navigation coordinator is instantiated.
+DDS discovery and acknowledgement traffic is necessary. The domain remains 0;
+the existing interface can be selected per invocation. No navigation coordinator
+is instantiated.
 """
 import argparse
 from dataclasses import asdict
 import json
 import os
 from pathlib import Path
+import socket
+import statistics
 import time
+import xml.etree.ElementTree as ET
 
 # Do not add command/request topics. Schema names must match live discovery.
 TOPICS = {
@@ -70,8 +74,18 @@ def source_stamp(payload):
     return None
 
 
+def config_for_interface(base_xml, interface):
+    root = ET.fromstring(base_xml)
+    nodes = root.findall('./Domain/General/Interfaces/NetworkInterface')
+    if len(nodes) != 1:
+        raise ValueError('expected exactly one CycloneDDS NetworkInterface')
+    nodes[0].set('name', interface)
+    return ET.tostring(root, encoding='unicode')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--interface', default=os.environ.get('G1_NETWORK_INTERFACE', 'enp129s0'))
     parser.add_argument('--seconds', type=float, default=15, help='Receive window after discovery (max 60)')
     parser.add_argument('--discovery-seconds', type=float, default=5,
                         help='Discovery window before selecting matching schemas (max 60)')
@@ -85,8 +99,10 @@ def main():
         parser.error('--discovery-seconds must be in (0, 60]')
     if not 0 <= args.sample_period <= 60:
         parser.error('--sample-period must be in [0, 60]')
+    socket.if_nametoindex(args.interface)
     root = Path(__file__).resolve().parents[1]
-    config = (root / 'config/g1-readonly-dds.xml').read_text()
+    config = config_for_interface(
+        (root / 'config/g1-readonly-dds.xml').read_text(), args.interface)
     os.environ['CYCLONEDDS_URI'] = config
     from cyclonedds.domain import Domain, DomainParticipant
     from cyclonedds.builtin import BuiltinDataReader, BuiltinTopicDcpsPublication, BuiltinTopicDcpsSubscription
@@ -101,7 +117,7 @@ def main():
     participant = DomainParticipant(0)
     own_guid = str(participant.guid)
     emit = lambda obj: print(json.dumps(obj), flush=True)
-    emit({'event': 'start', 'interface': 'enp129s0', 'domain': 0,
+    emit({'event': 'start', 'interface': args.interface, 'domain': 0,
           'own_participant': own_guid, 'receive_seconds': args.seconds, 'group': args.group,
           'discovery_seconds': args.discovery_seconds, 'sample_period': args.sample_period})
     builtins = [('publication', BuiltinDataReader(participant, BuiltinTopicDcpsPublication)),
@@ -136,7 +152,8 @@ def main():
                        'incompatible_qos': 0, 'stamp_changes': 0, 'last_stamp': None,
                        'last_by_type': {}, 'observed_types': sorted(published.get(name, set())),
                        'reader_created_unix_ns': None, 'first_match_unix_ns': None,
-                       'first_sample_unix_ns': None, 'last_sample_unix_ns': None}
+                       'first_sample_unix_ns': None, 'last_sample_unix_ns': None,
+                       '_arrival_monotonic_ns': []}
         item = stats[name]
         if expected not in published.get(name, set()):
             item['skipped'] = 'no publication with matching SDK type in discovery window'
@@ -165,7 +182,9 @@ def main():
                     continue
                 payload = summarize(item['kind'], s)
                 received_unix_ns = time.time_ns()
+                received_monotonic_ns = time.monotonic_ns()
                 item['samples'] += 1
+                item['_arrival_monotonic_ns'].append(received_monotonic_ns)
                 if item['first_sample_unix_ns'] is None:
                     item['first_sample_unix_ns'] = received_unix_ns
                 item['last_sample_unix_ns'] = received_unix_ns
@@ -188,6 +207,12 @@ def main():
     elapsed = time.monotonic() - receive_started
     for item in stats.values():
         item['observed_rate_hz'] = item['samples'] / elapsed
+        arrivals = item.pop('_arrival_monotonic_ns')
+        intervals_ms = [(b - a) / 1e6 for a, b in zip(arrivals, arrivals[1:])]
+        item['interval_mean_ms'] = statistics.fmean(intervals_ms) if intervals_ms else None
+        item['interval_median_ms'] = statistics.median(intervals_ms) if intervals_ms else None
+        item['max_gap_ms'] = max(intervals_ms) if intervals_ms else None
+        item['stale_events_over_1s'] = sum(value > 1000 for value in intervals_ms)
     emit({'event': 'summary', 'receive_elapsed_s': elapsed, 'topics': stats})
     return 0 if any(v['samples'] for v in stats.values()) else 2
 
