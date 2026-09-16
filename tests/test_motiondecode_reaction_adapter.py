@@ -38,6 +38,44 @@ def test_dry_run_resolves_frustration_to_named_cli(tmp_path: Path) -> None:
     assert adapter.wait_for_motion_complete("motiondecode:frustration") is True
 
 
+def test_dry_run_resolves_validated_surprise_to_named_cli(tmp_path: Path) -> None:
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return completed({
+            "reaction": "surprise", "status": "pass", "executed": False,
+            "released": False,
+        })
+
+    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run)
+    adapter.play_motion("motiondecode:surprise")
+
+    command, _ = calls[0]
+    assert "surprise" in command
+    assert "--dry-run" in command
+    assert adapter.wait_for_motion_complete("motiondecode:surprise") is True
+
+
+def test_dry_run_resolves_validated_found_to_named_cli(tmp_path: Path) -> None:
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return completed({
+            "reaction": "found", "status": "pass", "executed": False,
+            "released": False,
+        })
+
+    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run)
+    adapter.play_motion("motiondecode:found")
+
+    command, _ = calls[0]
+    assert "found" in command
+    assert "--dry-run" in command
+    assert adapter.wait_for_motion_complete("motiondecode:found") is True
+
+
 def test_wrong_reaction_is_rejected_before_subprocess(tmp_path: Path) -> None:
     adapter = MotionDecodeReactionAdapter(
         tmp_path, run_factory=lambda *a, **kw: pytest.fail("must not run")

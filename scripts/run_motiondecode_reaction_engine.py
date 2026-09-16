@@ -25,6 +25,9 @@ def main() -> int:
     parser.add_argument("--ssh-control")
     parser.add_argument("--timeout", type=float, default=420.0)
     parser.add_argument("--attended-gate", action="store_true")
+    parser.add_argument(
+        "--reaction", choices=("frustration", "surprise", "found"), default="frustration"
+    )
     args = parser.parse_args()
 
     adapter = MotionDecodeReactionAdapter(
@@ -38,8 +41,8 @@ def main() -> int:
         attended_real=args.attended_gate,
     )
     reaction = Reaction(
-        name="frustration-test-event",
-        motion="motiondecode:frustration",
+        name=f"{args.reaction}-test-event",
+        motion=f"motiondecode:{args.reaction}",
         speech="",
         speech_delay_seconds=0.0,
         priority=100,

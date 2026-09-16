@@ -11,7 +11,7 @@ from .robot import RobotAdapter
 
 
 MOTION_PREFIX = "motiondecode:"
-VALIDATED_REACTIONS = frozenset({"frustration"})
+VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found"})
 
 
 def parse_named_result(stdout: str) -> dict[str, Any]:
