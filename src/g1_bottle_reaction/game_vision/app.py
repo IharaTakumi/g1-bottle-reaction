@@ -68,9 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="G1-side /dev/v4l/by-id path; auto selects one non-RealSense camera")
     parser.add_argument("--usb-rotate", type=int, choices=(0, 180), default=0, help="USB display rotation in degrees")
     parser.add_argument("--start-usb-sender", action="store_true", help="start supervised GStreamer sender over SSH")
-    parser.add_argument("--g1-camera-transport", choices=("direct-dds", "ssh-rtp"),
+    parser.add_argument("--g1-camera-transport", choices=("direct-dds", "ssh-rtp", "ssh-jpeg"),
                         default="direct-dds",
-                        help="built-in camera transport; ssh-rtp runs VideoClient locally on G1")
+                        help="built-in camera transport; SSH modes run VideoClient locally on G1")
     parser.add_argument("--g1-camera-port", type=int, default=56001,
                         help="local UDP port for G1 built-in camera RTP/JPEG")
     parser.add_argument("--g1-camera-fps", type=float, default=30,

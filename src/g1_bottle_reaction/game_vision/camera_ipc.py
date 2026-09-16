@@ -3,6 +3,8 @@ import struct
 
 HEADER = struct.Struct("!4sIdHHHHBQ")
 MAGIC = b"GVC1"
+SSH_JPEG_HEADER = struct.Struct("!4sIQ")
+SSH_JPEG_MAGIC = b"G1J1"
 MAX_BYTES = 32 * 1024 * 1024
 JPEG, BGR = 0, 1
 
@@ -34,3 +36,21 @@ def receive(stream):
     if encoding == BGR and (not width or not height or size != width * height * 3):
         raise ValueError("invalid BGR dimensions")
     return read_exact(stream, size), stamp, width, height, ow, oh, encoding, lost
+
+
+def send_ssh_jpeg(stream, data, sequence):
+    """Length-frame one validated JPEG on the SSH binary-only stream."""
+    if not 0 < len(data) <= MAX_BYTES:
+        raise ValueError("invalid SSH JPEG size")
+    stream.write(SSH_JPEG_HEADER.pack(SSH_JPEG_MAGIC, len(data), sequence))
+    stream.write(data)
+    stream.flush()
+
+
+def receive_ssh_jpeg(stream):
+    magic, size, sequence = SSH_JPEG_HEADER.unpack(
+        read_exact(stream, SSH_JPEG_HEADER.size)
+    )
+    if magic != SSH_JPEG_MAGIC or not 0 < size <= MAX_BYTES:
+        raise ValueError("invalid SSH JPEG frame header")
+    return read_exact(stream, size), sequence

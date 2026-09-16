@@ -127,21 +127,28 @@ def serve_remote_camera_sender():
     import select
     import shutil
     import signal
+    import struct
     import subprocess
     import sys
     import time
     import xml.etree.ElementTree as ET
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dest", required=True)
-    parser.add_argument("--bind", required=True)
-    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--dest")
+    parser.add_argument("--bind")
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--stdout-framed", action="store_true")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--duration", type=float, default=3600.0)
     args = parser.parse_args()
-    if not 1024 <= args.port <= 65535 or not 0 < args.fps <= 60 or args.duration <= 0:
+    if not 0 < args.fps <= 60 or args.duration <= 0:
         raise ValueError("invalid G1 camera sender port, FPS or duration")
-    if not shutil.which("gst-launch-1.0"):
+    if not args.stdout_framed and (
+        not args.dest or not args.bind or args.port is None
+        or not 1024 <= args.port <= 65535
+    ):
+        raise ValueError("RTP camera sender requires dest, bind and valid port")
+    if not args.stdout_framed and not shutil.which("gst-launch-1.0"):
         raise RuntimeError("existing GStreamer is required on G1")
 
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -169,21 +176,27 @@ def serve_remote_camera_sender():
             client.SetTimeout(0.5)
             client.Init()
 
-        command = [
-            "gst-launch-1.0", "-q", "fdsrc", "fd=0", "do-timestamp=true",
-            "blocksize=1048576", "!", "jpegparse", "!", "rtpjpegpay",
-            "pt=26", "mtu=1200", "!", "udpsink", "host=" + args.dest,
-            "bind-address=" + args.bind, "port=" + str(args.port),
-            "sync=false", "async=false",
-        ]
-        env = dict(os.environ, GST_REGISTRY="/dev/null", GST_REGISTRY_UPDATE="no")
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, env=env)
-        print(json.dumps({"status": "ready", "transport": "RTP/JPEG",
-                          "dest": args.dest, "bind": args.bind, "port": args.port}), flush=True)
+        if args.stdout_framed:
+            binary = sys.stdout.buffer
+            frame_header = struct.Struct("!4sIQ")
+            print(json.dumps({"status": "ready", "transport": "SSH/JPEG"}),
+                  file=sys.stderr, flush=True)
+        else:
+            command = [
+                "gst-launch-1.0", "-q", "fdsrc", "fd=0", "do-timestamp=true",
+                "blocksize=1048576", "!", "jpegparse", "!", "rtpjpegpay",
+                "pt=26", "mtu=1200", "!", "udpsink", "host=" + args.dest,
+                "bind-address=" + args.bind, "port=" + str(args.port),
+                "sync=false", "async=false",
+            ]
+            env = dict(os.environ, GST_REGISTRY="/dev/null", GST_REGISTRY_UPDATE="no")
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, env=env)
+            print(json.dumps({"status": "ready", "transport": "RTP/JPEG",
+                              "dest": args.dest, "bind": args.bind, "port": args.port}), flush=True)
         next_frame = time.monotonic()
         last_report = next_frame
         while time.monotonic() - started < args.duration:
-            if process.poll() is not None:
+            if process is not None and process.poll() is not None:
                 raise RuntimeError("GStreamer RTP sender exited: %s" % process.returncode)
             if select.select([sys.stdin], [], [], 0)[0]:
                 sys.stdin.readline()
@@ -207,15 +220,21 @@ def serve_remote_camera_sender():
             if len(payload) < 4 or payload[:2] != b"\xff\xd8":
                 errors += 1
                 continue
-            process.stdin.write(payload)
-            process.stdin.flush()
+            if args.stdout_framed:
+                binary.write(frame_header.pack(b"G1J1", len(payload), frames + 1))
+                binary.write(payload)
+                binary.flush()
+            else:
+                process.stdin.write(payload)
+                process.stdin.flush()
             frames += 1
             sent_bytes += len(payload)
             last_frame = time.monotonic()
             if last_frame - last_report >= 5:
                 elapsed = last_frame - started
                 print("G1 CAMERA SENDER: frames=%d fps=%.1f bytes=%d errors=%d" % (
-                    frames, frames / elapsed if elapsed else 0.0, sent_bytes, errors), flush=True)
+                    frames, frames / elapsed if elapsed else 0.0, sent_bytes, errors),
+                    file=sys.stderr if args.stdout_framed else sys.stdout, flush=True)
                 last_report = last_frame
     finally:
         if process is not None:
@@ -237,7 +256,8 @@ def serve_remote_camera_sender():
                         process.wait()
         elapsed = time.monotonic() - started
         print("G1 CAMERA SENDER STOPPED: frames=%d fps=%.1f errors=%d" % (
-            frames, frames / elapsed if elapsed else 0.0, errors), flush=True)
+            frames, frames / elapsed if elapsed else 0.0, errors),
+            file=sys.stderr if args.stdout_framed else sys.stdout, flush=True)
 
 
 def g1_local_safe_action_main(

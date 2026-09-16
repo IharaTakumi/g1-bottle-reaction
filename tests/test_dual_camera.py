@@ -12,7 +12,18 @@ import numpy as np
 import pytest
 
 from g1_bottle_reaction.game_vision.app import build_parser
-from g1_bottle_reaction.game_vision.camera_ipc import BGR, HEADER, MAGIC, MAX_BYTES, receive, send
+from g1_bottle_reaction.game_vision.camera_ipc import (
+    BGR,
+    HEADER,
+    MAGIC,
+    MAX_BYTES,
+    SSH_JPEG_HEADER,
+    SSH_JPEG_MAGIC,
+    receive,
+    receive_ssh_jpeg,
+    send,
+    send_ssh_jpeg,
+)
 from g1_bottle_reaction.game_vision.dual import (
     FrameState, LatestReader, compose, letterbox, resolve_g1_route,
     resolve_ssh_target, start_g1_camera_sender, start_sender, validate_args,
@@ -132,6 +143,7 @@ def test_g1_camera_sender_runs_video_client_on_g1_and_uses_separate_port(monkeyp
     ["--g1-camera-port", "0"], ["--g1-camera-fps", "0"],
     ["--g1-camera-fps", "nan"], ["--no-usb-camera", "--start-usb-sender"],
     ["--g1-camera-transport", "ssh-rtp"],
+    ["--g1-camera-transport", "ssh-jpeg"],
     ["--enable-real-robot"],
     ["--robot", "g1", "--yolo", "--found-audio"],
 ])
@@ -205,6 +217,103 @@ def test_pipe_rejects_partial_and_oversized_frames():
         receive(io.BytesIO(HEADER.pack(MAGIC, MAX_BYTES + 1, 0, 1, 1, 1, 1, BGR, 0)))
     with pytest.raises(ValueError):
         receive(io.BytesIO(HEADER.pack(MAGIC, 4, 0, 1, 1, 1, 1, BGR, 0)))
+
+
+class FragmentedStream(io.BytesIO):
+    def read(self, size=-1):
+        return super().read(min(size, 3) if size >= 0 else 3)
+
+
+def test_ssh_jpeg_framing_restores_fragmented_and_consecutive_reads():
+    stream = io.BytesIO()
+    send_ssh_jpeg(stream, b"\xff\xd8first", 1)
+    send_ssh_jpeg(stream, b"\xff\xd8second", 2)
+    fragmented = FragmentedStream(stream.getvalue())
+    assert receive_ssh_jpeg(fragmented) == (b"\xff\xd8first", 1)
+    assert receive_ssh_jpeg(fragmented) == (b"\xff\xd8second", 2)
+
+
+def test_ssh_jpeg_framing_rejects_invalid_length_and_truncation():
+    oversized = SSH_JPEG_HEADER.pack(SSH_JPEG_MAGIC, MAX_BYTES + 1, 1)
+    with pytest.raises(ValueError, match="frame header"):
+        receive_ssh_jpeg(io.BytesIO(oversized))
+    truncated = SSH_JPEG_HEADER.pack(SSH_JPEG_MAGIC, 20, 1) + b"short"
+    with pytest.raises(EOFError, match="pipe closed"):
+        receive_ssh_jpeg(FragmentedStream(truncated))
+
+
+def test_latest_reader_drops_bad_jpeg_without_publishing_a_frame():
+    stream = io.BytesIO()
+    send(stream, b"not-a-jpeg", time.monotonic())
+    stream.seek(0)
+    reader = LatestReader("bad-jpeg", [])
+    reader.process = type("Process", (), {"stdout": stream})()
+    reader._read()
+    state = reader.snapshot()
+    assert state.count == 0
+    assert "closed" in state.error
+
+
+def test_ssh_jpeg_relay_keeps_binary_stdout_clean_and_closes_child():
+    from tools.g1_camera_pipe import ssh_jpeg
+
+    remote = io.BytesIO()
+    send_ssh_jpeg(remote, b"\xff\xd8jpeg", 1)
+    remote.seek(0)
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = io.BytesIO()
+            self.stdout = remote
+            self.returncode = None
+            self.terminated = False
+
+        def wait(self, timeout=None):
+            del timeout
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+    child = FakeProcess()
+    calls = []
+    args = SimpleNamespace(
+        fps=10.0,
+        duration=2.0,
+        ssh_control="/tmp/control",
+        ssh_target="unitree@example",
+    )
+    output = io.BytesIO()
+    ssh_jpeg(
+        args,
+        popen_factory=lambda command, **kwargs: calls.append((command, kwargs)) or child,
+        output=output,
+    )
+    assert child.stdin.closed
+    command, options = calls[0]
+    assert "--stdout-framed" in command[-1]
+    assert options["stdout"] is not None
+    assert "stderr" not in options  # remote logs inherit stderr, never binary stdout
+    output.seek(0)
+    assert receive(output)[0] == b"\xff\xd8jpeg"
+
+
+def test_all_g1_camera_transports_remain_available():
+    parser = build_parser()
+    for transport in ("direct-dds", "ssh-rtp", "ssh-jpeg"):
+        args = parser.parse_args([
+            "--source", "dual", "--usb-host", "10.42.0.76",
+            "--g1-camera-transport", transport,
+        ])
+        assert args.g1_camera_transport == transport
 
 
 def test_latest_slot_drops_old_frames_and_failure_is_local():

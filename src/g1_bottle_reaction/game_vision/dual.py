@@ -196,8 +196,8 @@ def validate_args(args):
             and args.g1_camera_transport == "ssh-rtp"
             and args.g1_camera_port == args.usb_port):
         raise ValueError("G1 and USB camera RTP ports must be different")
-    if args.g1_camera_transport == "ssh-rtp" and host.is_loopback:
-        raise ValueError("--g1-camera-transport ssh-rtp requires a non-loopback --usb-host")
+    if args.g1_camera_transport in {"ssh-rtp", "ssh-jpeg"} and host.is_loopback:
+        raise ValueError("SSH G1 camera transport requires a non-loopback --usb-host")
     if args.duration is not None and (not math.isfinite(args.duration) or args.duration <= 0):
         raise ValueError("--duration must be finite and positive")
     if args.max_frames is not None and args.max_frames <= 0:
@@ -398,6 +398,15 @@ def run(args):
             if args.g1_camera_transport == "ssh-rtp":
                 cmd = [args.gst_python, "-B", helper, "rtp", "--label", "G1",
                        "--bind", args.usb_bind, "--port", str(args.g1_camera_port)]
+            elif args.g1_camera_transport == "ssh-jpeg":
+                cmd = [
+                    sys.executable, "-B", helper, "ssh-jpeg",
+                    "--ssh-target", ssh_target,
+                    "--fps", str(args.g1_camera_fps),
+                    "--duration", str(math.ceil(args.duration) + 60 if args.duration else 3600),
+                ]
+                if args.ssh_control:
+                    cmd += ["--ssh-control", args.ssh_control]
             else:
                 cmd = [sys.executable, "-B", helper, "g1"]
                 camera_interface = args.network_interface or route_interface
@@ -441,7 +450,7 @@ def run(args):
         if yolo:
             print("y=YOLO ON/OFF b=boxes ON/OFF; PERSON+BANANA+PLUSHIE ON G1 ONLY; "
                   f"REACTION PRIORITY=PERSON>BANANA>PLUSHIE; ROBOT={args.robot.upper()}", flush=True)
-        if (args.start_usb_sender or args.g1_camera_transport == "ssh-rtp"
+        if (args.start_usb_sender or args.g1_camera_transport in {"ssh-rtp", "ssh-jpeg"}
                 or (found_settings and found_settings.output == "g1")):
             print(f"G1 SSH TARGET: {ssh_target}", flush=True)
         while True:
