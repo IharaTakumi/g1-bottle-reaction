@@ -27,7 +27,7 @@ def test_dry_run_resolves_frustration_to_named_cli(tmp_path: Path) -> None:
             "released": False,
         })
 
-    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run)
+    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run, resident=False)
     adapter.play_motion("motiondecode:frustration")
 
     command, kwargs = calls[0]
@@ -48,7 +48,7 @@ def test_dry_run_resolves_validated_surprise_to_named_cli(tmp_path: Path) -> Non
             "released": False,
         })
 
-    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run)
+    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run, resident=False)
     adapter.play_motion("motiondecode:surprise")
 
     command, _ = calls[0]
@@ -67,7 +67,7 @@ def test_dry_run_resolves_validated_found_to_named_cli(tmp_path: Path) -> None:
             "released": False,
         })
 
-    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run)
+    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run, resident=False)
     adapter.play_motion("motiondecode:found")
 
     command, _ = calls[0]
@@ -78,7 +78,7 @@ def test_dry_run_resolves_validated_found_to_named_cli(tmp_path: Path) -> None:
 
 def test_wrong_reaction_is_rejected_before_subprocess(tmp_path: Path) -> None:
     adapter = MotionDecodeReactionAdapter(
-        tmp_path, run_factory=lambda *a, **kw: pytest.fail("must not run")
+        tmp_path, run_factory=lambda *a, **kw: pytest.fail("must not run"), resident=False
     )
     with pytest.raises(ValueError, match="not allowlisted"):
         adapter.play_motion("motiondecode:unknown")
@@ -88,6 +88,7 @@ def test_nonzero_exit_is_reported(tmp_path: Path) -> None:
     adapter = MotionDecodeReactionAdapter(
         tmp_path,
         run_factory=lambda *a, **kw: subprocess.CompletedProcess([], 2, "", "failed"),
+        resident=False,
     )
     with pytest.raises(RuntimeError, match="exited with code 2"):
         adapter.play_motion("motiondecode:frustration")
@@ -97,7 +98,7 @@ def test_timeout_is_not_swallowed(tmp_path: Path) -> None:
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
 
-    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=timeout)
+    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=timeout, resident=False)
     with pytest.raises(subprocess.TimeoutExpired):
         adapter.play_motion("motiondecode:frustration")
 
@@ -114,7 +115,7 @@ def test_concurrent_execution_is_rejected(tmp_path: Path) -> None:
             "released": False,
         })
 
-    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run)
+    adapter = MotionDecodeReactionAdapter(tmp_path, run_factory=run, resident=False)
     worker = threading.Thread(
         target=adapter.play_motion, args=("motiondecode:frustration",)
     )
@@ -131,13 +132,13 @@ def test_real_result_requires_release_and_q0(tmp_path: Path) -> None:
     adapter = MotionDecodeReactionAdapter(
         tmp_path,
         real=True,
-        enabled=True,
+        enabled=True, resident=False,
         run_factory=lambda *a, **kw: completed({
             "reaction": "frustration", "status": "pass", "executed": True,
             "released": False, "returned_to_q0": True,
         }),
     )
-    with pytest.raises(RuntimeError, match="lacks execution/release/q0 proof"):
+    with pytest.raises(RuntimeError, match="lacks required cleanup proof"):
         adapter.play_motion("motiondecode:frustration")
 
 
@@ -149,7 +150,7 @@ def test_attended_real_retains_manual_gate_boundary(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(command, 0, None, None)
 
     adapter = MotionDecodeReactionAdapter(
-        tmp_path, real=True, enabled=True, attended_real=True, run_factory=run
+        tmp_path, real=True, enabled=True, attended_real=True, run_factory=run, resident=False
     )
     adapter.play_motion("motiondecode:frustration")
     command, kwargs = calls[0]
@@ -162,3 +163,52 @@ def test_attended_real_retains_manual_gate_boundary(tmp_path: Path) -> None:
 def test_result_parser_rejects_ambiguous_output() -> None:
     with pytest.raises(RuntimeError, match="found 2"):
         parse_named_result('{}\n{}\n')
+
+
+class FakeResidentChannel:
+    def __init__(self):
+        self.requests = []; self.closed = False
+
+    def request(self, payload):
+        self.requests.append(payload)
+        if payload["operation"] == "status":
+            return {"accepted": True, "state": "READY"}
+        return {"accepted": True, "state": "READY", "reaction": payload["reaction"],
+                "status": "pass", "executed": False, "released": True,
+                "returned_to_q0": True}
+
+    def close(self):
+        self.closed = True
+
+
+def test_resident_adapter_connects_at_start_and_reuses_channel(tmp_path: Path) -> None:
+    channel = FakeResidentChannel()
+    adapter = MotionDecodeReactionAdapter(tmp_path, channel_factory=lambda: channel)
+    adapter.play_motion("motiondecode:surprise")
+    adapter.play_motion("motiondecode:found")
+    assert [request["operation"] for request in channel.requests] == [
+        "status", "execute", "execute"]
+    assert all("trigger_monotonic_s" in request for request in channel.requests[1:])
+    adapter.close(); assert channel.closed
+
+
+def test_resident_worker_unavailable_fails_without_cli_fallback(tmp_path: Path) -> None:
+    class NotReady(FakeResidentChannel):
+        def request(self, payload):
+            return {"accepted": True, "state": "FAULT", "reason": "not ready"}
+    with pytest.raises(RuntimeError, match="not READY"):
+        MotionDecodeReactionAdapter(tmp_path, channel_factory=NotReady)
+
+
+def test_real_resident_uses_weight_zero_cleanup_proof(tmp_path: Path) -> None:
+    class RealChannel(FakeResidentChannel):
+        def request(self, payload):
+            if payload["operation"] == "status":
+                return {"accepted": True, "state": "READY"}
+            return {"accepted": True, "state": "READY", "reaction": payload["reaction"],
+                    "status": "pass", "executed": True, "released": True,
+                    "weight_zero": True, "returned_to_q0": False}
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path, real=True, enabled=True, channel_factory=RealChannel)
+    adapter.play_motion("motiondecode:surprise")
+    assert adapter.wait_for_motion_complete("motiondecode:surprise")

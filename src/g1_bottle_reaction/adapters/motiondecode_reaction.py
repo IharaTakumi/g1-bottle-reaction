@@ -1,17 +1,79 @@
-"""Subprocess boundary to validated named reactions in motiondecode-test."""
+"""IPC boundary to the resident MotionDecode reaction worker."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
+import shlex
+import socket
 import subprocess
 import threading
+import time
 from typing import Any, Callable
 
 from .robot import RobotAdapter
 
 
 MOTION_PREFIX = "motiondecode:"
-VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found"})
+VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found", "joy"})
+
+
+class LocalResidentChannel:
+    def __init__(self, socket_path: str, timeout: float) -> None:
+        self.socket_path = socket_path; self.timeout = timeout
+
+    def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(self.timeout); client.connect(self.socket_path)
+            stream = client.makefile("rwb")
+            stream.write((json.dumps(payload, sort_keys=True) + "\n").encode()); stream.flush()
+            raw = stream.readline()
+        if not raw:
+            raise RuntimeError("MotionDecode worker closed without a response")
+        result = json.loads(raw)
+        if not isinstance(result, dict):
+            raise RuntimeError("MotionDecode worker response must be an object")
+        return result
+
+    def close(self) -> None:
+        pass
+
+
+class SshResidentChannel:
+    """Persistent SSH stdio bridge; no process is started on reaction trigger."""
+    def __init__(self, *, target: str, control: str | None, remote_root: str,
+                 socket_path: str, timeout: float,
+                 popen_factory: Callable[..., Any] = subprocess.Popen) -> None:
+        remote = (f"cd {shlex.quote(remote_root)} && python3 scripts/resident_worker_client.py "
+                  f"--stdio --socket {shlex.quote(socket_path)} --timeout {timeout:g}")
+        command = ["ssh", "-T", "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
+                   "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=2",
+                   "-o", "ServerAliveCountMax=2"]
+        if control:
+            command.extend(["-S", control])
+        command.extend(["--", target, remote])
+        self.process = popen_factory(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, bufsize=1)
+        self._lock = threading.Lock()
+
+    def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self.process.poll() is not None:
+                detail = self.process.stderr.read()[-1000:]
+                raise RuntimeError(f"MotionDecode SSH bridge exited: {detail}")
+            self.process.stdin.write(json.dumps(payload, sort_keys=True) + "\n")
+            self.process.stdin.flush(); raw = self.process.stdout.readline()
+        if not raw:
+            raise RuntimeError("MotionDecode SSH bridge closed without a response")
+        result = json.loads(raw)
+        if not isinstance(result, dict):
+            raise RuntimeError("MotionDecode worker response must be an object")
+        return result
+
+    def close(self) -> None:
+        if self.process.poll() is None:
+            self.process.stdin.close(); self.process.terminate()
+            try: self.process.wait(timeout=2.)
+            except subprocess.TimeoutExpired: self.process.kill()
 
 
 def parse_named_result(stdout: str) -> dict[str, Any]:
@@ -41,6 +103,10 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         python: Path | None = None,
         environ: dict[str, str] | None = None,
         run_factory: Callable[..., Any] = subprocess.run,
+        resident: bool = True,
+        socket_path: str = "/tmp/motiondecode-reaction.sock",
+        remote_root: str = "/tmp/motiondecode-current",
+        channel_factory: Callable[[], Any] | None = None,
         fallback: RobotAdapter | None = None,
     ) -> None:
         if real and not enabled:
@@ -62,12 +128,26 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self.python = python or self.repository / ".venv" / "bin" / "python"
         self.environ = environ
         self._run_factory = run_factory
+        self.resident = bool(resident)
+        self.socket_path = socket_path
         self.fallback = fallback
         self._operation_lock = threading.Lock()
         self._shutdown = threading.Event()
         self._last_motion: str | None = None
         self._last_succeeded = False
         self._last_result: dict[str, Any] | None = None
+        self._channel = None
+        if self.resident:
+            self._channel = (channel_factory() if channel_factory else
+                (LocalResidentChannel(socket_path, timeout_seconds)
+                 if transport == "local" else
+                 SshResidentChannel(target=ssh_target, control=ssh_control,
+                                    remote_root=remote_root, socket_path=socket_path,
+                                    timeout=timeout_seconds)))
+            status = self._channel.request({"operation": "status"})
+            if not status.get("accepted") or status.get("state") != "READY":
+                self._channel.close(); self._channel = None
+                raise RuntimeError(f"MotionDecode resident worker is not READY: {status}")
 
     @property
     def last_result(self) -> dict[str, Any] | None:
@@ -114,42 +194,35 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self._last_motion = motion
         self._last_succeeded = False
         try:
-            completed = self._run_factory(
-                self._command(reaction),
-                cwd=self.repository,
-                env=self.environ,
-                text=True,
-                capture_output=not self.attended_real,
-                timeout=self.timeout_seconds + 45.0,
-            )
-            if completed.returncode != 0:
-                detail = (
-                    (completed.stderr or completed.stdout)[-2000:].strip()
-                    if not self.attended_real
-                    else "attended MotionDecode CLI failed"
-                )
-                raise RuntimeError(
-                    f"MotionDecode CLI exited with code {completed.returncode}: {detail}"
-                )
-            result = (
-                {
-                    "reaction": reaction,
-                    "status": "pass",
-                    "executed": True,
-                    "released": True,
-                    "returned_to_q0": True,
-                }
-                if self.attended_real
-                else parse_named_result(completed.stdout)
-            )
+            trigger = time.monotonic()
+            if self.resident:
+                result = self._channel.request({"operation": "execute", "reaction": reaction,
+                                                "trigger_monotonic_s": trigger})
+                if not result.get("accepted"):
+                    raise RuntimeError(f"MotionDecode worker rejected request: {result}")
+            else:
+                completed = self._run_factory(
+                    self._command(reaction), cwd=self.repository, env=self.environ,
+                    text=True, capture_output=not self.attended_real,
+                    timeout=self.timeout_seconds + 45.0)
+                if completed.returncode != 0:
+                    detail = ((completed.stderr or completed.stdout)[-2000:].strip()
+                              if not self.attended_real else "attended MotionDecode CLI failed")
+                    raise RuntimeError(
+                        f"MotionDecode CLI exited with code {completed.returncode}: {detail}")
+                result = ({"reaction": reaction, "status": "pass", "executed": True,
+                           "released": True, "returned_to_q0": True}
+                          if self.attended_real else parse_named_result(completed.stdout))
             if result.get("reaction") != reaction or result.get("status") != "pass":
                 raise RuntimeError(f"MotionDecode CLI returned failure: {result}")
-            if self.real and not (
-                result.get("executed")
-                and result.get("released")
-                and result.get("returned_to_q0")
-            ):
-                raise RuntimeError("Real MotionDecode result lacks execution/release/q0 proof")
+            if self.real:
+                proof = bool(result.get("executed") and result.get("released"))
+                if self.resident:
+                    proof = proof and bool(result.get("weight_zero"))
+                else:
+                    proof = proof and bool(result.get("returned_to_q0"))
+                if not proof:
+                    raise RuntimeError("Real MotionDecode result lacks required cleanup proof")
             if not self.real and result.get("executed"):
                 raise RuntimeError("MotionDecode dry-run unexpectedly executed")
             self._last_result = result
@@ -171,5 +244,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
 
     def close(self) -> None:
         self.request_shutdown()
+        if self._channel is not None:
+            self._channel.close(); self._channel = None
         if self.fallback is not None:
             self.fallback.close()

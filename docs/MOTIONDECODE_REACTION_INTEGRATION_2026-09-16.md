@@ -1,5 +1,15 @@
 # MotionDecode Reaction Engine integration
 
+## Resident IPC path
+
+`MotionDecodeReactionAdapter` は既定でresident workerを使います。PC2 transportでは
+adapter生成時に1本のSSH stdio bridgeを起動し、そのbridgeをUnix socketへ接続したまま
+再利用します。reaction trigger時に新しいPython/DDS processは起動しません。
+
+workerがREADYでない場合は明示的に失敗し、ゲーム中に低速CLIへ自動fallbackしません。
+旧CLIは診断用に `resident=False` を指定した場合だけ利用できます。Reaction Engineの既存
+audio executorはmotion requestと並列に開始されます。
+
 Validated on G1 through the explicit test-event path:
 
 ```text

@@ -25,8 +25,11 @@ def main() -> int:
     parser.add_argument("--ssh-control")
     parser.add_argument("--timeout", type=float, default=420.0)
     parser.add_argument("--attended-gate", action="store_true")
+    parser.add_argument("--legacy-cli", action="store_true",
+                        help="Debug only: bypass the resident worker")
+    parser.add_argument("--socket", default="/tmp/motiondecode-reaction.sock")
     parser.add_argument(
-        "--reaction", choices=("frustration", "surprise", "found"), default="frustration"
+        "--reaction", choices=("frustration", "surprise", "found", "joy"), default="frustration"
     )
     args = parser.parse_args()
 
@@ -39,6 +42,8 @@ def main() -> int:
         ssh_control=args.ssh_control,
         timeout_seconds=args.timeout,
         attended_real=args.attended_gate,
+        resident=not args.legacy_cli,
+        socket_path=args.socket,
     )
     reaction = Reaction(
         name=f"{args.reaction}-test-event",
