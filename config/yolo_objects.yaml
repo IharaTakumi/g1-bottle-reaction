@@ -10,7 +10,16 @@ banana_sound: assets/audio/reactions/banana/detected.wav
 # Semantic "plushie" uses the COCO teddy bear class (class 77).
 plushie_confidence: 0.25
 plushie_found_duration: 0.3
-plushie_dropout_grace: 0.30
+# The wireless G1 JPEG path can deliver fresh local frames below 2 FPS. Keep
+# the 0.3 s confirmation threshold, but allow two fresh positive samples to
+# bridge that measured sampling gap. A repeated single result still cannot fire.
+plushie_dropout_grace: 1.0
 plushie_audio_cooldown: 2.0
-plushie_rearm_absence: 1.0
-plushie_sound: assets/audio/reactions/plushie/detected.wav
+# Only fresh RUNNING YOLO observations advance this explicit-absence interval.
+# Overlapping person misclassifications of the last plushie region do not count.
+plushie_rearm_absence: 3.0
+plushie_absence_blocking_overlap: 0.1
+plushie_sound: assets/audio/reactions/plushie/plushie_affectionate.wav
+
+# Per-playback attenuation only. Source WAV and system/G1 volume are unchanged.
+quiet_mode_gain_db: -24.0

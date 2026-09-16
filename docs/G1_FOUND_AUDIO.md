@@ -46,13 +46,32 @@ cloneした環境でもそのまま利用できます。
 
 - `assets/audio/reactions/person/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（旧f0e5...音声）
 - `assets/audio/reactions/banana/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（banana_surprised.wav）
-- `assets/audio/reactions/plushie/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（plushie_affectionate.wav）
+- `assets/audio/reactions/plushie/plushie_affectionate.wav`: PCM WAV、44,100 Hz、16bit、mono
 
 bananaも0.3秒継続検出後に1回だけ再生します。実機で短い検出抜けが見られたためbananaだけ0.30秒まで
 検出抜けを許容し、画面から1秒以上消えた後に再発火可能です。
-plushieも同じ0.3秒継続、0.30秒dropout grace、2秒cooldown、1秒absenceの設定で、
+plushieは0.3秒継続、1.0秒dropout grace、2秒cooldown、3秒の明示的不在で、
 画面に映り続ける間はユーザー提供音声を1回だけ再生します。
 実際に使ったフルパスは `FOUND AUDIO: /home/.../xxxx.wav` とconsoleに出力します。
+
+## Plushie AFFECTION / JOY minimal integration
+
+`--robot motiondecode` を選んだ場合だけ、confirmed plushie eventを既存の
+`ReactionEvent.YOLO_PLUSHIE_FOUND`として共有Reaction Engineへ渡し、実機validated済みの
+`motiondecode:surprise`（上半身 arms 50% / waist 25%、脚trajectoryなし）と
+`plushie_affectionate.wav`を同じjobから並列開始します。`motiondecode:joy`は所有runtimeで
+`real_g1_validated=false`のため実機経路ではfail-closedです。
+この新規modeではperson/bananaは表示・ログだけに残し、Reaction選択には入れません。
+既存robot modeのperson → banana → plushie優先規則はそのままです。
+
+wireless G1 JPEG経路で実測した低い有効frame rateに対し、confirmation thresholdは
+0.3秒のまま、plushieだけdropout graceを1.0秒、rearm連続陰性を3.0秒にします。同一resultの再利用は拒否され、
+camera/YOLO停止・stale・新規観測なしでは不在時間を進めません。また、最後のplushie領域の10%以上を覆うperson誤分類も不在として数えません。
+異なる2つ以上のfresh positive frameがない限り発火しません。
+
+`--quiet-mode`は再生用の一時PCMだけを`config/yolo_objects.yaml`の
+`quiet_mode_gain_db`（会場調整値 -24 dB）で減衰します。元WAVとOS/G1のvolume設定は変更しません。
+実機MotionDecodeでは`--enable-real-robot --confirm-site-ready --quiet-mode`をすべて必須とします。
 固定音声なら `--found-sound /absolute/path.wav`。存在・非空PCM WAVを起動前に検証します。
 
 ユーザーの指定により、既定出力は**G1本体スピーカー**です。

@@ -640,11 +640,12 @@ def test_default_audio_paths_are_semantic_and_separate(tmp_path):
         'banana_sound': 'assets/audio/reactions/banana/detected.wav',
         'plushie_found_duration': .3, 'plushie_dropout_grace': .15,
         'plushie_audio_cooldown': 2., 'plushie_rearm_absence': 1.,
-        'plushie_sound': 'assets/audio/reactions/plushie/detected.wav'}))
+        'plushie_sound': 'assets/audio/reactions/plushie/plushie_affectionate.wav',
+        'quiet_mode_gain_db': -30.0}))
     banana = load_banana_settings(tmp_path, .25, 'g1')
     assert banana.sounds == (banana_path.resolve(),)
     assert banana.confidence == .25 and banana.output == 'g1'
-    plushie_path = tmp_path/'assets/audio/reactions/plushie/detected.wav'
+    plushie_path = tmp_path/'assets/audio/reactions/plushie/plushie_affectionate.wav'
     plushie_path.parent.mkdir(parents=True)
     with wave.open(str(plushie_path), 'wb') as stream:
         stream.setnchannels(1)
@@ -654,6 +655,7 @@ def test_default_audio_paths_are_semantic_and_separate(tmp_path):
     plushie = load_plushie_settings(tmp_path, .25, 'g1')
     assert plushie.sounds == (plushie_path.resolve(),)
     assert plushie.confidence == .25 and plushie.output == 'g1'
+    assert plushie.rearm_absence == 1.0
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='G1 audio pipe helper is Linux-only')

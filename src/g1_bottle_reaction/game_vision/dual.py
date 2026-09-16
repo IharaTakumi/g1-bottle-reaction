@@ -202,6 +202,8 @@ def validate_args(args):
         raise ValueError("--duration must be finite and positive")
     if args.max_frames is not None and args.max_frames <= 0:
         raise ValueError("--max-frames must be positive")
+    if not math.isfinite(args.motiondecode_timeout) or args.motiondecode_timeout <= 0:
+        raise ValueError("--motiondecode-timeout must be finite and positive")
     if args.robot in {"g1", "g1-ssh"}:
         if not args.found_audio:
             raise ValueError("real robot adapters require --found-audio")
@@ -212,8 +214,21 @@ def validate_args(args):
             )
         if args.robot == "g1-ssh" and not args.execute_real_action:
             raise ValueError("--robot g1-ssh requires --execute-real-action")
+    elif args.robot == "motiondecode":
+        if not args.found_audio:
+            raise ValueError("MotionDecode reactions require --found-audio")
+        if args.g1_motion != "disabled":
+            raise ValueError("MotionDecode does not use --g1-motion")
+        if args.enable_real_robot and not args.confirm_site_ready:
+            raise ValueError(
+                "Real MotionDecode requires --enable-real-robot --confirm-site-ready"
+            )
+        if args.enable_real_robot and not args.quiet_mode:
+            raise ValueError("Real plushie reaction requires --quiet-mode")
     elif args.enable_real_robot or args.g1_motion != "disabled":
         raise ValueError("Real robot safety flags require --robot g1")
+    if args.confirm_site_ready and args.robot != "motiondecode":
+        raise ValueError("--confirm-site-ready is restricted to --robot motiondecode")
     if args.execute_real_action and args.robot != "g1-ssh":
         raise ValueError("--execute-real-action is restricted to --robot g1-ssh")
     if any((args.publish_processed, args.publish_safety, args.vision_preset, args.fog_mode,
@@ -299,10 +314,16 @@ def run(args):
         banana_confidence = load_banana_confidence(args, ROOT)
         plushie_confidence = load_plushie_confidence(args, ROOT)
     if args.found_audio:
-        from .found_audio import load_banana_settings, load_plushie_settings, load_settings
+        from .found_audio import (
+            load_banana_settings,
+            load_plushie_settings,
+            load_quiet_gain_db,
+            load_settings,
+        )
         found_settings = load_settings(args, ROOT)
         banana_settings = load_banana_settings(ROOT, banana_confidence, found_settings.output)
         plushie_settings = load_plushie_settings(ROOT, plushie_confidence, found_settings.output)
+        quiet_gain_db = load_quiet_gain_db(ROOT) if args.quiet_mode else None
     if not args.headless and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         raise RuntimeError("A desktop session is required; otherwise use --headless")
     readers = {}
@@ -328,10 +349,12 @@ def run(args):
     try:
         if found_settings:
             from .found_audio import (
+                AttenuatedWavOutput,
                 ConsoleWavOutput,
                 FoundGate,
                 FoundReactionController,
                 select_audio_trigger,
+                select_plushie_only_trigger,
             )
             from g1_bottle_reaction.adapters.cached_audio import G1SshAudioOutput, LinuxAplayOutput
             from g1_bottle_reaction.adapters.g1_robot import G1RobotAdapter
@@ -347,13 +370,20 @@ def run(args):
                                     banana_settings.rearm_absence, object_attribute="bananas")
             plushie_gate = FoundGate(plushie_settings.duration, plushie_settings.grace,
                                      plushie_settings.cooldown, plushie_settings.confidence,
-                                     plushie_settings.rearm_absence, object_attribute="plushies")
+                                     plushie_settings.rearm_absence,
+                                     object_attribute="plushies",
+                                     absence_blocking_attributes=("people",),
+                                     absence_overlap=(
+                                         plushie_settings.absence_blocking_overlap
+                                     ))
             if found_settings.output == "g1":
                 output = G1SshAudioOutput(ssh_target, args.ssh_control)
             elif found_settings.output == "pc":
                 output = LinuxAplayOutput()
             else:
                 output = ConsoleWavOutput()
+            if args.quiet_mode:
+                output = AttenuatedWavOutput(output, quiet_gain_db)
             core_config = load_config(ROOT / "config/default.yaml")
             if args.robot == "g1":
                 robot = G1RobotAdapter(
@@ -373,8 +403,30 @@ def run(args):
                     execute_real_action=args.execute_real_action,
                 )
                 robot.initialize()
+            elif args.robot == "motiondecode":
+                from g1_bottle_reaction.adapters.motiondecode_reaction import (
+                    MotionDecodeReactionAdapter,
+                )
+
+                robot = MotionDecodeReactionAdapter(
+                    args.motiondecode_repository,
+                    real=args.enable_real_robot,
+                    enabled=args.enable_real_robot,
+                    transport=args.motiondecode_transport,
+                    ssh_target=ssh_target,
+                    ssh_control=args.ssh_control,
+                    timeout_seconds=args.motiondecode_timeout,
+                    resident=True,
+                    socket_path=args.motiondecode_socket,
+                    fallback=MockRobotAdapter(),
+                )
             else:
                 robot = MockRobotAdapter()
+            motion_overrides = (
+                {"plushie": "motiondecode:surprise"}
+                if args.robot == "motiondecode"
+                else None
+            )
             reaction = FoundReactionController(
                 {
                     "person": found_settings,
@@ -385,6 +437,8 @@ def run(args):
                 robot,
                 base_reaction=core_config.reaction.items[ReactionEvent.FOUND.value],
                 cooldown_seconds=core_config.reaction.cooldown_seconds,
+                motion_overrides=motion_overrides,
+                speech_delay_overrides={"plushie": 0.0},
             )
             print(f"FOUND REACTION: robot={args.robot}, output={found_settings.output}, "
                   f"motion=notice, files={len(found_settings.sounds)}, "
@@ -393,7 +447,14 @@ def run(args):
             print(f"BANANA AUDIO: files={len(banana_settings.sounds)}, duration={banana_gate.duration}s, "
                   f"priority=PERSON; ONCE UNTIL BANANA LEAVES", flush=True)
             print(f"PLUSHIE AUDIO: files={len(plushie_settings.sounds)}, duration={plushie_gate.duration}s, "
-                  f"YOLO class=77 teddy bear; ONCE UNTIL PLUSHIE LEAVES", flush=True)
+                  f"YOLO class=77 teddy bear; motion="
+                  f"{motion_overrides['plushie'] if motion_overrides else 'notice'}; "
+                  f"ONCE UNTIL PLUSHIE LEAVES", flush=True)
+            print(
+                f"QUIET MODE: {'ON' if args.quiet_mode else 'OFF'}"
+                + (f" ({quiet_gain_db:g} dB, audio only)" if args.quiet_mode else ""),
+                flush=True,
+            )
         if args.source == "dual":
             if args.g1_camera_transport == "ssh-rtp":
                 cmd = [args.gst_python, "-B", helper, "rtp", "--label", "G1",
@@ -449,7 +510,8 @@ def run(args):
         print(f"{controls}; local age is NOT capture-to-display latency", flush=True)
         if yolo:
             print("y=YOLO ON/OFF b=boxes ON/OFF; PERSON+BANANA+PLUSHIE ON G1 ONLY; "
-                  f"REACTION PRIORITY=PERSON>BANANA>PLUSHIE; ROBOT={args.robot.upper()}", flush=True)
+                  f"REACTION TARGET={args.reaction_target.upper()}; "
+                  f"ROBOT={args.robot.upper()}", flush=True)
         if (args.start_usb_sender or args.g1_camera_transport in {"ssh-rtp", "ssh-jpeg"}
                 or (found_settings and found_settings.output == "g1")):
             print(f"G1 SSH TARGET: {ssh_target}", flush=True)
@@ -458,15 +520,47 @@ def run(args):
             states = {key: r.snapshot() for key, r in readers.items()}
             if yolo:
                 g1 = states["g1"]
-                detection = visible_detection(yolo.snapshot(), g1.frame is not None and not g1.error
-                                              and now - g1.stamp <= .5, now)
+                raw_detection = yolo.snapshot()
+                detection = visible_detection(
+                    raw_detection,
+                    g1.frame is not None and not g1.error and now - g1.stamp <= .5,
+                    now,
+                )
                 message = transitions.update(detection)
                 if message:
                     print(message, flush=True)
                 if gate:
-                    trigger = select_audio_trigger(
-                        detection, now, gate, banana_gate, plushie_gate,
-                        audio_busy=reaction.busy or bool(reaction.audio_error))
+                    # Keep existing person/banana freshness unchanged. Plushie
+                    # gets its configured dropout grace so the measured low-FPS
+                    # wireless path can provide two distinct positive frames;
+                    # FoundGate still rejects replaying one result.
+                    plushie_detection = visible_detection(
+                        raw_detection,
+                        g1.frame is not None
+                        and not g1.error
+                        and now - g1.stamp <= plushie_gate.grace,
+                        now,
+                        max_age=plushie_gate.grace,
+                    )
+                    busy = reaction.busy or bool(reaction.audio_error)
+                    if args.robot == "motiondecode":
+                        trigger = select_plushie_only_trigger(
+                            plushie_detection,
+                            now,
+                            plushie_gate,
+                            audio_busy=busy,
+                        )
+                    else:
+                        trigger = select_audio_trigger(
+                            detection,
+                            now,
+                            gate,
+                            banana_gate,
+                            plushie_gate,
+                            audio_busy=busy,
+                            plushie_result=plushie_detection,
+                            reaction_target=args.reaction_target,
+                        )
                     if trigger == "person":
                         if reaction.trigger(trigger, now):
                             print(f"PERSON REACTION TRIGGER: cooldown {gate.cooldown:.2f}s", flush=True)
@@ -475,7 +569,13 @@ def run(args):
                             print(f"BANANA REACTION TRIGGER: cooldown {banana_gate.cooldown:.2f}s", flush=True)
                     elif trigger == "plushie":
                         if reaction.trigger(trigger, now):
-                            print(f"PLUSHIE REACTION TRIGGER: cooldown {plushie_gate.cooldown:.2f}s", flush=True)
+                            print(
+                                "PLUSHIE REACTION TRIGGER: "
+                                f"first_detection_monotonic={plushie_gate.confirmed_start:.6f}; "
+                                f"confirmed_monotonic={now:.6f}; "
+                                f"cooldown={plushie_gate.cooldown:.2f}s",
+                                flush=True,
+                            )
                     found_label = ("AUDIO ERROR (disabled)" if reaction.audio_error else
                                    f"P {gate.compact_label(now)} | B {banana_gate.compact_label(now)} | "
                                    f"T {plushie_gate.compact_label(now)}")

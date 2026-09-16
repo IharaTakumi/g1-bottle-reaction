@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 import math
 from pathlib import Path
+import tempfile
 import threading
+import time
 import wave
 
+import numpy as np
 import yaml
 
 from g1_bottle_reaction.adapters.robot import RobotAdapter
@@ -26,6 +30,7 @@ class FoundSettings:
     sounds: tuple[Path, ...]
     output: str
     rearm_absence: float
+    absence_blocking_overlap: float = 0.1
 
 
 FOUND_REACTION_EVENTS = {
@@ -55,7 +60,10 @@ class FoundWavSpeechBackend(SpeechBackend):
     def speak(self, text: str, *, voice_profile: str = "neutral") -> None:
         del voice_profile
         path = Path(text)
-        print(f"Audio triggered: {path}", flush=True)
+        print(
+            f"Audio triggered: {path}; monotonic={time.monotonic():.6f}",
+            flush=True,
+        )
         try:
             self.output.play_wav(path)
         except Exception as exc:
@@ -69,6 +77,52 @@ class FoundWavSpeechBackend(SpeechBackend):
         close = getattr(self.output, "close", None)
         if close:
             close()
+
+
+class AttenuatedWavOutput:
+    """Apply a temporary per-playback PCM gain without touching source WAVs."""
+
+    def __init__(self, delegate, gain_db: float) -> None:
+        if not math.isfinite(gain_db) or not -60.0 <= gain_db < 0.0:
+            raise ValueError("quiet audio gain must be finite and in [-60, 0) dB")
+        self.delegate = delegate
+        self.gain_db = float(gain_db)
+        self.linear_gain = 10.0 ** (self.gain_db / 20.0)
+        self._temporary = tempfile.TemporaryDirectory(prefix="g1-quiet-audio-")
+        self._cache: dict[Path, Path] = {}
+        self._lock = threading.Lock()
+
+    def play_wav(self, path: Path) -> None:
+        source = Path(path).resolve()
+        with self._lock:
+            quiet = self._cache.get(source)
+            if quiet is None:
+                quiet = self._render(source)
+                self._cache[source] = quiet
+        self.delegate.play_wav(quiet)
+
+    def _render(self, source: Path) -> Path:
+        from g1_bottle_reaction.adapters.g1_audio import wav_to_pcm16_mono_16k
+
+        pcm = np.frombuffer(wav_to_pcm16_mono_16k(source), dtype="<i2")
+        attenuated = np.rint(pcm.astype(np.float64) * self.linear_gain)
+        attenuated = np.clip(attenuated, -32768, 32767).astype("<i2")
+        digest = hashlib.sha256(str(source).encode()).hexdigest()[:16]
+        target = Path(self._temporary.name) / f"{digest}-{source.name}"
+        with wave.open(str(target), "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(16_000)
+            stream.writeframes(attenuated.tobytes())
+        return target
+
+    def close(self) -> None:
+        try:
+            close = getattr(self.delegate, "close", None)
+            if close:
+                close()
+        finally:
+            self._temporary.cleanup()
 
 
 class FailSafeReactionRobotAdapter(RobotAdapter):
@@ -85,7 +139,11 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
                 flush=True,
             )
             return
-        print(f"Motion reaction triggered: {motion}", flush=True)
+        print(
+            f"Motion reaction triggered: {motion}; "
+            f"monotonic={time.monotonic():.6f}",
+            flush=True,
+        )
         try:
             self.delegate.play_motion(motion)
             if getattr(self.delegate, "last_motion_timed_out", False):
@@ -118,14 +176,25 @@ class FoundReactionController:
         *,
         base_reaction: Reaction,
         cooldown_seconds: float,
+        motion_overrides: dict[str, str] | None = None,
+        speech_delay_overrides: dict[str, float] | None = None,
     ) -> None:
         if base_reaction.motion != "notice":
             raise ValueError("Dual-camera G1 reaction is restricted to existing 'notice'")
+        motion_overrides = motion_overrides or {}
+        speech_delay_overrides = speech_delay_overrides or {}
+        unknown = (set(motion_overrides) | set(speech_delay_overrides)) - set(settings)
+        if unknown:
+            raise ValueError(f"Unknown found reaction overrides: {sorted(unknown)}")
         items = {
             FOUND_REACTION_EVENTS[name].value: replace(
                 base_reaction,
                 name=FOUND_REACTION_EVENTS[name].value,
+                motion=motion_overrides.get(name, base_reaction.motion),
                 speech=str(value.sounds[0]),
+                speech_delay_seconds=speech_delay_overrides.get(
+                    name, base_reaction.speech_delay_seconds
+                ),
                 encounter_variants=(),
                 bypass_cooldown=False,
             )
@@ -156,6 +225,11 @@ class FoundReactionController:
     def trigger(self, name: str, now: float) -> bool:
         if name not in FOUND_REACTION_EVENTS:
             raise ValueError(f"Unknown found reaction target: {name}")
+        # The camera loop drops ordinary events while a reaction owns the
+        # worker.  Do not let callers accumulate jobs in ReactionEngine either.
+        if self.busy:
+            print(f"{name.upper()} REACTION DROP: reaction already running", flush=True)
+            return False
         decision = self.engine.handle(
             FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
         )
@@ -163,7 +237,7 @@ class FoundReactionController:
             self._jobs.append(decision.job)
             print(
                 f"{name.upper()} REACTION EVENT: audio + "
-                f"motion={decision.reaction.motion}",
+                f"motion={decision.reaction.motion}; confirmed_monotonic={now:.6f}",
                 flush=True,
             )
         return decision.accepted
@@ -220,12 +294,27 @@ def load_plushie_settings(root, confidence, output):
     grace = float(values["plushie_dropout_grace"])
     cooldown = float(values["plushie_audio_cooldown"])
     absence = float(values["plushie_rearm_absence"])
+    blocking_overlap = float(values.get("plushie_absence_blocking_overlap", 0.1))
     if not all(math.isfinite(v) and v > 0 for v in (duration, grace, cooldown, absence)):
         raise ValueError("plushie audio timing values must be finite and positive")
+    if not math.isfinite(blocking_overlap) or not 0 < blocking_overlap <= 1:
+        raise ValueError("plushie absence blocking overlap must be in (0, 1]")
     path = Path(values["plushie_sound"])
     path = (path if path.is_absolute() else root / path).resolve()
     validate_sound(path)
-    return FoundSettings(confidence, duration, grace, cooldown, (path,), output, absence)
+    return FoundSettings(
+        confidence, duration, grace, cooldown, (path,), output, absence,
+        blocking_overlap,
+    )
+
+
+def load_quiet_gain_db(root) -> float:
+    with (root / "config/yolo_objects.yaml").open(encoding="utf-8") as stream:
+        values = yaml.safe_load(stream)
+    gain_db = float(values["quiet_mode_gain_db"])
+    if not math.isfinite(gain_db) or not -60.0 <= gain_db < 0.0:
+        raise ValueError("quiet_mode_gain_db must be finite and in [-60, 0) dB")
+    return gain_db
 
 
 def validate_sound(path):
@@ -239,20 +328,55 @@ def validate_sound(path):
         raise ValueError(f"Cannot play existing WAV {path}: {exc}") from exc
 
 
-def select_audio_trigger(result, now, person_gate, banana_gate, plushie_gate=None, *, audio_busy=False):
+def select_audio_trigger(
+    result,
+    now,
+    person_gate,
+    banana_gate,
+    plushie_gate=None,
+    *,
+    audio_busy=False,
+    plushie_result=None,
+    reaction_target="all",
+):
     """Choose at most one reaction in person, banana, plushie priority order."""
+    plushie_result = result if plushie_result is None else plushie_result
+    if reaction_target == "person":
+        return "person" if person_gate.update(
+            result, now, audio_busy=audio_busy
+        ) else None
+    if reaction_target == "banana":
+        return "banana" if banana_gate.update(
+            result, now, audio_busy=audio_busy
+        ) else None
+    if reaction_target == "plushie":
+        if plushie_gate is None:
+            return None
+        return select_plushie_only_trigger(
+            plushie_result, now, plushie_gate, audio_busy=audio_busy
+        )
+    if reaction_target != "all":
+        raise ValueError(f"Unknown reaction target: {reaction_target}")
     if person_gate.update(result, now, audio_busy=audio_busy):
         banana_gate.update(result, now, audio_busy=True, inhibit=True)
         if plushie_gate is not None:
-            plushie_gate.update(result, now, audio_busy=True, inhibit=True)
+            plushie_gate.update(plushie_result, now, audio_busy=True, inhibit=True)
         return "person"
     if banana_gate.update(result, now, audio_busy=audio_busy,
                           inhibit=bool(result.people)):
         if plushie_gate is not None:
-            plushie_gate.update(result, now, audio_busy=True, inhibit=True)
+            plushie_gate.update(plushie_result, now, audio_busy=True, inhibit=True)
         return "banana"
     if plushie_gate is not None and plushie_gate.update(
-            result, now, audio_busy=audio_busy, inhibit=bool(result.people or result.bananas)):
+            plushie_result, now, audio_busy=audio_busy,
+            inhibit=bool(result.people or result.bananas)):
+        return "plushie"
+    return None
+
+
+def select_plushie_only_trigger(result, now, plushie_gate, *, audio_busy=False):
+    """The MotionDecode integration intentionally exposes only plushie."""
+    if plushie_gate.update(result, now, audio_busy=audio_busy):
         return "plushie"
     return None
 
@@ -260,11 +384,15 @@ def select_audio_trigger(result, now, person_gate, banana_gate, plushie_gate=Non
 class FoundGate:
     """Fresh source timestamps only: replaying one YOLO result cannot trigger."""
     def __init__(self, duration=.3, grace=.15, cooldown=2., confidence=.25,
-                 rearm_absence=1., object_attribute="people"):
+                 rearm_absence=1., object_attribute="people",
+                 absence_blocking_attributes=(), absence_overlap=0.1):
         self.duration, self.grace, self.cooldown = duration, grace, cooldown
         self.confidence = confidence
         self.rearm_absence = rearm_absence
         self.object_attribute = object_attribute
+        self.absence_blocking_attributes = tuple(absence_blocking_attributes)
+        self.absence_overlap = absence_overlap
+        self.last_positive_boxes = ()
         self.waiting_clear = False
         self.clear_start = self.clear_last = None
         self.start = self.last = None
@@ -272,6 +400,8 @@ class FoundGate:
         self.eligible_after = -math.inf
         self.until = -math.inf
         self.state = "SEARCHING"
+        self.confirmed_start = None
+        self.confirmed_at = None
 
     def clear_detection(self):
         self.start = self.last = None
@@ -301,10 +431,15 @@ class FoundGate:
         self.last_sample = stamp
         if stamp <= self.eligible_after or now - stamp > self.grace:
             return False
-        positive = any(item.confidence >= self.confidence
-                       for item in getattr(result, self.object_attribute))
+        positive_items = tuple(
+            item for item in getattr(result, self.object_attribute)
+            if item.confidence >= self.confidence
+        )
+        positive = bool(positive_items)
+        if positive_items:
+            self.last_positive_boxes = tuple(item.box for item in positive_items)
         if self.waiting_clear:
-            if positive:
+            if positive or self._absence_is_blocked(result):
                 self.clear_start = self.clear_last = None
             else:
                 if self.clear_start is None:
@@ -325,11 +460,36 @@ class FoundGate:
         if stamp - self.start + 1e-9 < self.duration or audio_busy or inhibit:
             return False
         self.until = now + self.cooldown
+        self.confirmed_start = self.start
+        self.confirmed_at = stamp
         self.eligible_after = self.until
         self.start = self.last = None
         self.state = "COOLDOWN"
         self.waiting_clear = True
         return True
+
+    def _absence_is_blocked(self, result):
+        """Reject a negative that still contains an overlapping misclassification."""
+        for attribute in self.absence_blocking_attributes:
+            for item in getattr(result, attribute):
+                if item.confidence < self.confidence:
+                    continue
+                for previous in self.last_positive_boxes:
+                    if self._overlap_fraction(previous, item.box) >= self.absence_overlap:
+                        return True
+        return False
+
+    @staticmethod
+    def _overlap_fraction(reference, candidate):
+        left = max(reference[0], candidate[0])
+        top = max(reference[1], candidate[1])
+        right = min(reference[2], candidate[2])
+        bottom = min(reference[3], candidate[3])
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        reference_area = max(0.0, reference[2] - reference[0]) * max(
+            0.0, reference[3] - reference[1]
+        )
+        return intersection / reference_area if reference_area else 0.0
 
     def label(self, now):
         if self.state == "COOLDOWN":

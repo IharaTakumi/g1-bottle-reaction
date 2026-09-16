@@ -212,3 +212,16 @@ def test_real_resident_uses_weight_zero_cleanup_proof(tmp_path: Path) -> None:
         tmp_path, real=True, enabled=True, channel_factory=RealChannel)
     adapter.play_motion("motiondecode:surprise")
     assert adapter.wait_for_motion_complete("motiondecode:surprise")
+
+
+def test_real_adapter_rejects_unvalidated_joy_before_execute(tmp_path: Path) -> None:
+    channel = FakeResidentChannel()
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path,
+        real=True,
+        enabled=True,
+        channel_factory=lambda: channel,
+    )
+    with pytest.raises(RuntimeError, match="not validated for real G1: joy"):
+        adapter.play_motion("motiondecode:joy")
+    assert [request["operation"] for request in channel.requests] == ["status"]

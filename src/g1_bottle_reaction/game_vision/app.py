@@ -89,6 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="banana threshold; default from config/yolo_objects.yaml")
     parser.add_argument("--plushie-confidence", type=float,
                         help="teddy bear threshold; default from config/yolo_objects.yaml")
+    parser.add_argument(
+        "--reaction-target",
+        choices=("all", "person", "banana", "plushie"),
+        default="all",
+        help="limit reaction triggers while keeping all YOLO detections visible",
+    )
     parser.add_argument("--yolo-fps", type=float, default=15, help="maximum inference rate; latest frame only")
     parser.add_argument("--found-audio", action="store_true", help="opt-in reaction WAV after sustained G1 object detection")
     parser.add_argument("--found-duration", type=float, help="sustained person duration; default from person_found_audio.yaml")
@@ -97,13 +103,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rearm-absence", type=float, help="person must be absent this many seconds before rearming")
     parser.add_argument("--found-sound", help="existing WAV path; default: configured person reaction WAV")
     parser.add_argument(
+        "--quiet-mode",
+        action="store_true",
+        help="attenuate reaction WAV playback by the configured negative dB gain",
+    )
+    parser.add_argument(
         "--found-output",
         choices=("g1", "pc", "mock"),
         help="audio output; mock only logs playback, default G1 speaker",
     )
     parser.add_argument(
         "--robot",
-        choices=("mock", "g1", "g1-ssh"),
+        choices=("mock", "g1", "g1-ssh", "motiondecode"),
         default="mock",
         help=(
             "Reaction Engine robot adapter; g1-ssh runs the fixed notice in a "
@@ -118,6 +129,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--g1-motion", choices=("disabled", "safe-actions"), default="disabled"
+    )
+    parser.add_argument(
+        "--motiondecode-repository",
+        type=Path,
+        default=Path("/home/ubuntu/dev/motiondecode-test"),
+    )
+    parser.add_argument(
+        "--motiondecode-transport", choices=("local", "ssh"), default="ssh"
+    )
+    parser.add_argument(
+        "--motiondecode-socket", default="/tmp/motiondecode-reaction.sock"
+    )
+    parser.add_argument("--motiondecode-timeout", type=float, default=420.0)
+    parser.add_argument(
+        "--confirm-site-ready",
+        action="store_true",
+        help="explicit attended-site gate for real MotionDecode reactions",
     )
     parser.add_argument("--g1-stream-host", help="PC2 host publishing processed game images")
     parser.add_argument("--g1-stream-port", type=int, help="processed TeleImager ZMQ port")

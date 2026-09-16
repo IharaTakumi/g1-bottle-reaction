@@ -15,6 +15,10 @@ from .robot import RobotAdapter
 
 MOTION_PREFIX = "motiondecode:"
 VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found", "joy"})
+# Keep real execution aligned with motiondecode-test/config/named_reactions.json.
+# ``joy`` remains available for dry-run compatibility but is explicitly marked
+# real_g1_validated=false by the owning runtime.
+REAL_G1_VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found"})
 
 
 class LocalResidentChannel:
@@ -189,6 +193,10 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             return
         if self._shutdown.is_set():
             raise RuntimeError("MotionDecode adapter is shutting down")
+        if self.real and reaction not in REAL_G1_VALIDATED_REACTIONS:
+            raise RuntimeError(
+                f"MotionDecode reaction is not validated for real G1: {reaction}"
+            )
         if not self._operation_lock.acquire(blocking=False):
             raise RuntimeError("Another robot motion is already executing")
         self._last_motion = motion
@@ -225,6 +233,25 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                     raise RuntimeError("Real MotionDecode result lacks required cleanup proof")
             if not self.real and result.get("executed"):
                 raise RuntimeError("MotionDecode dry-run unexpectedly executed")
+            timing = {
+                key: result.get(key)
+                for key in (
+                    "reaction_engine_trigger_monotonic_s",
+                    "worker_receive_monotonic_s",
+                    "acquire_start_monotonic_s",
+                    "clip_start_monotonic_s",
+                    "execution_completed_monotonic_s",
+                    "worker_to_acquire_s",
+                    "trigger_to_clip_s",
+                )
+                if key in result
+            }
+            if timing:
+                print(
+                    "MOTIONDECODE TIMING: "
+                    + json.dumps(timing, sort_keys=True),
+                    flush=True,
+                )
             self._last_result = result
             self._last_succeeded = True
         finally:
