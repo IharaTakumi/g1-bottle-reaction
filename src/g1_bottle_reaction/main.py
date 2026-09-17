@@ -48,6 +48,10 @@ from g1_bottle_reaction.custom_motion import (
     format_dry_run,
     load_custom_motion_config,
 )
+from g1_bottle_reaction.navigation.wander.shadow import (
+    run_replay_shadow,
+    run_synthetic_shadow,
+)
 from g1_bottle_reaction.reactions.engine import ReactionEngine
 from g1_bottle_reaction.reactions.models import Reaction
 from g1_bottle_reaction.simulation.motion import (
@@ -65,6 +69,22 @@ from g1_bottle_reaction.vision.camera import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="G1 bottle reaction prototype")
     parser.add_argument("--simulate", action="store_true", help="use scripted input")
+    parser.add_argument(
+        "--wander-shadow",
+        action="store_true",
+        help="run decision-only synthetic Mapless Wander scenarios",
+    )
+    parser.add_argument(
+        "--wander-replay",
+        type=Path,
+        metavar="JSONL",
+        help="replay odometry and points/obstacle snapshots without robot commands",
+    )
+    parser.add_argument(
+        "--wander-seed",
+        type=int,
+        help="make Mapless Wander tie-breaking reproducible",
+    )
     parser.add_argument(
         "--simulate-stealth",
         action="store_true",
@@ -381,6 +401,24 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config = load_config(args.config)
         config = _apply_custom_notice_overrides(config, args)
+        if args.wander_shadow or args.wander_replay is not None:
+            if args.robot != "mock" or args.enable_real_robot or args.enable_real_navigation:
+                raise ValueError(
+                    "Mapless Wander shadow/replay is decision-only and rejects real robot/navigation flags"
+                )
+            if args.wander_replay is not None:
+                count = run_replay_shadow(
+                    config.wander,
+                    args.wander_replay,
+                    seed=args.wander_seed,
+                )
+                print(f"REPLAY={count} samples")
+                return 0
+            passed, total = run_synthetic_shadow(
+                config.wander,
+                seed=args.wander_seed,
+            )
+            return 0 if passed == total else 1
         if args.navigation_test is not None:
             _run_navigation_diagnostic(args, config)
             return 0

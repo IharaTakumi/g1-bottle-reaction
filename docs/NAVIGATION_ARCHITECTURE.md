@@ -1,5 +1,12 @@
 # Navigation architecture
 
+Mapless Wander v1 is an offline decision layer under
+`src/g1_bottle_reaction/navigation/wander`. It consumes a five-sector local
+obstacle snapshot plus short-lived odometry, and has no SDK or command output.
+It intentionally does not add SLAM, a global map, localization, or a global
+planner. Live validation must follow
+[MAPLESS_WANDER_G1_VALIDATION.md](MAPLESS_WANDER_G1_VALIDATION.md).
+
 ## Scope
 
 This phase adds the Windows-side **Navigation capability boundary** used by the

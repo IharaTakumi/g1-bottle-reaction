@@ -235,6 +235,46 @@ navigation:
   reaction_completion_timeout_s: 10.0
   auto_pause_for_reaction: true
 
+# Mapless Wander v1 is decision-only until live shadow validation is complete.
+# Axis signs, height band, and self mask are placeholders for tonight's read-only
+# MID-360 verification; they are not asserted as real-G1 calibration facts.
+wander:
+  point_cloud:
+    forward_axis: "+x"
+    left_axis: "+y"
+    up_axis: "+z"
+    min_height_m: 0.10
+    max_height_m: 1.60
+    min_range_m: 0.20
+    max_range_m: 4.00
+    self_mask_front_m: 0.45
+    self_mask_back_m: 0.35
+    self_mask_half_width_m: 0.40
+    sector_edges_degrees: [-90, -54, -18, 18, 54, 90]
+    minimum_valid_points: 5
+  policy:
+    blocked_distance_m: 0.80
+    forward_continuity_bonus: 0.80
+    random_bias: 0.20
+    clearance_weight: 1.00
+    revisit_penalty_weight: 3.00
+    leash_penalty_weight: 4.00
+    candidate_step_m: 0.80
+    turn_angle_degrees: 45.0
+    minimum_action_duration_s: 0.60
+  safety:
+    stale_after_s: 0.50
+    odom_stale_after_s: 0.50
+    caution_distance_m: 1.20
+    hard_stop_distance_m: 0.35
+  trail:
+    retention_s: 20.0
+    max_samples: 200
+    revisit_radius_m: 0.50
+  leash:
+    soft_limit_m: 4.0
+    hard_limit_m: 5.0
+
 logging:
   event_log: logs/events.jsonl
 

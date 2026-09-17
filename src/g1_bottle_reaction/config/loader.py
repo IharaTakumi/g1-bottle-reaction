@@ -6,6 +6,7 @@ from typing import Any
 
 import yaml
 
+from g1_bottle_reaction.navigation.wander import WanderConfig
 from g1_bottle_reaction.reactions.models import EncounterVariant, Reaction
 
 
@@ -312,6 +313,7 @@ class AppConfig:
     speech: SpeechConfig
     g1: G1Config
     navigation: NavigationConfig
+    wander: WanderConfig
     event_log: Path
     simulation_realtime_scale: float
 
@@ -409,6 +411,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     g1.validate()
     navigation = NavigationConfig(**raw["navigation"])
     navigation.validate()
+    wander = WanderConfig.from_mapping(raw["wander"])
     return AppConfig(
         vision=VisionConfig(**raw["vision"]),
         tracking=tracking,
@@ -467,6 +470,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ),
         g1=g1,
         navigation=navigation,
+        wander=wander,
         event_log=Path(raw["logging"]["event_log"]),
         simulation_realtime_scale=float(raw["simulation"].get("realtime_scale", 0)),
     )
