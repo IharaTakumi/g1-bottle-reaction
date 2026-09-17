@@ -156,3 +156,27 @@ def test_new_obstacle_interrupts_forward_then_returns_to_observe():
     assert result["status"] == "pass"
     assert result["actions"][0]["interrupted_reason"].startswith("obstacle")
     assert client.calls[-1] == ("StopMove",)
+
+
+def test_termination_during_pulse_stops_exactly_once_and_exits_fail_closed():
+    clock = FakeClock()
+    client = FakeClient()
+    requested = lambda: clock.value >= 0.10
+    acknowledged = []
+    result = run_reactive_mvp(
+        ReactiveMvpPlan(run_seconds=2, max_pulses=2),
+        FakeTelemetry(), client, lambda: [], clock=clock, sleep=clock.sleep,
+        stop_requested=requested, on_stop=lambda: acknowledged.append(True))
+    assert result["status"] == "fail"
+    assert "termination requested" in result["reason"]
+    assert [call[0] for call in client.calls] == ["SetVelocity", "StopMove"]
+    assert acknowledged == [True]
+
+
+def test_termination_between_pulses_issues_one_explicit_stop():
+    client = FakeClient()
+    result = run_reactive_mvp(
+        ReactiveMvpPlan(run_seconds=2), FakeTelemetry(), client, lambda: [],
+        stop_requested=lambda: True)
+    assert result["status"] == "fail"
+    assert client.calls == [("StopMove",)]

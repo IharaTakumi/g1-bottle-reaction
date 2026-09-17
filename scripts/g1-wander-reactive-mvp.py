@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import threading
@@ -16,6 +17,23 @@ if str(ROOT) not in sys.path:
 
 from robot_side.adapters.g1_robot import UnitreeSdkRuntime
 from robot_side.wander_reactive_mvp import ReactiveMvpPlan, run_reactive_mvp
+
+
+class TerminationRequest:
+    """Turn process signals into one fail-closed StopMove acknowledgement."""
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.signal_number = None
+        self.stop_acknowledged = False
+
+    def request(self, signal_number, _frame):
+        if self.signal_number is None:
+            self.signal_number = signal_number
+        self.event.set()
+
+    def acknowledge_stop(self):
+        self.stop_acknowledged = True
 
 
 def body_writer_conflicts():
@@ -115,7 +133,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--duration", "--run-seconds", dest="run_seconds", type=float,
-        default=30.0, help="bounded Wander runtime in seconds (maximum: 60)")
+        default=30.0, help="bounded Wander runtime in seconds (maximum: 3600)")
     parser.add_argument("--max-pulses", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--interface", default="eth0")
@@ -152,15 +170,37 @@ def main(argv=None, runtime=None):
     print("FSM: code=%r id=%r" % (code, fsm_id), flush=True)
     if code != 0 or fsm_id != 501:
         raise RuntimeError("expected locomotion FSM 501, got code=%r id=%r" % (code, fsm_id))
-    telemetry = JsonlReactiveTelemetry(args.interface, args.config)
+    termination = TerminationRequest()
+    previous_handlers = {
+        signum: signal.signal(signum, termination.request)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    telemetry = None
     try:
+        telemetry = JsonlReactiveTelemetry(args.interface, args.config)
         result = run_reactive_mvp(
             plan, telemetry, client, body_writer_conflicts,
-            emit=lambda value: print("EVENT " + json.dumps(value, sort_keys=True), flush=True))
+            emit=lambda value: print("EVENT " + json.dumps(value, sort_keys=True), flush=True),
+            stop_requested=termination.event.is_set,
+            on_stop=termination.acknowledge_stop)
         print("SUMMARY " + json.dumps(result, sort_keys=True), flush=True)
+        if termination.signal_number is not None:
+            return 128 + termination.signal_number
         return 0 if result["status"] == "pass" else 2
     finally:
-        telemetry.close()
+        try:
+            if termination.event.is_set() and not termination.stop_acknowledged:
+                stop_result = client.StopMove()
+                termination.acknowledge_stop()
+                if stop_result not in (None, 0):
+                    raise RuntimeError("StopMove returned %r" % (stop_result,))
+        finally:
+            try:
+                if telemetry is not None:
+                    telemetry.close()
+            finally:
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

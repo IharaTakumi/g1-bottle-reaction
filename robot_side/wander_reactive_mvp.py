@@ -30,8 +30,8 @@ class ReactiveMvpPlan:
         )
         if not all(math.isfinite(value) for value in numeric):
             raise ValueError("all limits must be finite")
-        if not 0 < self.run_seconds <= 60.0:
-            raise ValueError("run_seconds must be in (0, 60]")
+        if not 0 < self.run_seconds <= 3600.0:
+            raise ValueError("run_seconds must be in (0, 3600]")
         if not 0 < self.forward_speed_m_s <= 0.20:
             raise ValueError("forward speed must be in (0, 0.20]")
         if not 0 < self.forward_duration_s <= 0.50:
@@ -99,10 +99,13 @@ def _command_for(action, plan):
 
 
 def run_reactive_mvp(plan, telemetry, client, conflict_check,
-                     clock=time.monotonic, sleep=time.sleep, emit=None):
+                     clock=time.monotonic, sleep=time.sleep, emit=None,
+                     stop_requested=None, on_stop=None):
     """Alternate OBSERVE and one bounded motion pulse; fail closed on any error."""
     plan.validate()
     emit = emit or (lambda value: None)
+    stop_requested = stop_requested or (lambda: False)
+    on_stop = on_stop or (lambda: None)
     rng = random.Random(plan.seed)
     started = clock()
     actions = []
@@ -110,6 +113,12 @@ def run_reactive_mvp(plan, telemetry, client, conflict_check,
     telemetry.wait_ready(min(3.0, plan.run_seconds))
     try:
         while clock() - started < plan.run_seconds and len(actions) < plan.max_pulses:
+            if stop_requested():
+                stop_result = client.StopMove()
+                on_stop()
+                if stop_result not in (None, 0):
+                    raise RuntimeError("StopMove returned %r" % (stop_result,))
+                raise InterruptedError("operator termination requested")
             conflicts = conflict_check()
             if conflicts:
                 raise RuntimeError("body writer conflict: " + "; ".join(conflicts))
@@ -142,6 +151,9 @@ def run_reactive_mvp(plan, telemetry, client, conflict_check,
                                 "body writer conflict: " + "; ".join(conflicts))
                         next_conflict_check = clock() + 0.25
                     live_snapshot = validate_snapshot(telemetry.latest(), plan)
+                    if stop_requested():
+                        entry["interrupted_reason"] = "operator termination requested"
+                        break
                     if (action == "FORWARD_PULSE" and
                             min(live_snapshot["front_left"], live_snapshot["front"],
                                 live_snapshot["front_right"]) <= plan.blocked_distance_m):
@@ -150,9 +162,12 @@ def run_reactive_mvp(plan, telemetry, client, conflict_check,
                         break
             finally:
                 stop_result = client.StopMove()
+                on_stop()
                 entry["stop_result"] = stop_result
                 if stop_result not in (None, 0):
                     raise RuntimeError("StopMove returned %r" % (stop_result,))
+            if stop_requested():
+                raise InterruptedError("operator termination requested")
     except BaseException as exc:
         failure = exc
     result = {
