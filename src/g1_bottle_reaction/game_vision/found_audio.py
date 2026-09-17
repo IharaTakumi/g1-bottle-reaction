@@ -14,6 +14,9 @@ import numpy as np
 import yaml
 
 from g1_bottle_reaction.adapters.robot import RobotAdapter
+from g1_bottle_reaction.adapters.motiondecode_reaction import (
+    MotionDecodeSafeReturnMiss,
+)
 from g1_bottle_reaction.adapters.speech import SpeechBackend
 from g1_bottle_reaction.config.loader import ReactionConfig
 from g1_bottle_reaction.reactions.engine import ReactionEngine, ReactionJob
@@ -150,6 +153,14 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
                 raise RuntimeError(
                     "Unitree safe Action returned RPC timeout 3104"
                 )
+        except MotionDecodeSafeReturnMiss as exc:
+            print(
+                "MOTION REACTION SAFE RETURN MISS: "
+                f"reaction={exc.reaction} returned_to_q0=false "
+                "motion disabled for this event only; "
+                "next reaction remains enabled",
+                flush=True,
+            )
         except Exception as exc:
             self.error = str(exc)
             print(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import shlex
 import socket
@@ -19,6 +20,46 @@ VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found", "joy"})
 # ``joy`` remains available for dry-run compatibility but is explicitly marked
 # real_g1_validated=false by the owning runtime.
 REAL_G1_VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found"})
+
+
+class MotionDecodeSafeReturnMiss(RuntimeError):
+    """A failed q0 return whose independent resident postflight is fully safe."""
+
+    def __init__(self, reaction: str, result: dict[str, Any],
+                 resident_status: dict[str, Any]) -> None:
+        self.reaction = reaction
+        self.result = dict(result)
+        self.controlled_q0_return_error_rad = result.get(
+            "controlled_q0_return_error_rad"
+        )
+        self.returned_to_q0 = result.get("returned_to_q0")
+        self.resident_status = dict(resident_status)
+        super().__init__(
+            f"reaction={reaction} returned_to_q0={self.returned_to_q0} "
+            f"controlled_q0_return_error_rad="
+            f"{self.controlled_q0_return_error_rad}"
+        )
+
+
+def _resident_postflight_is_safe(status: dict[str, Any]) -> bool:
+    """Require the complete post-reaction resident safety contract."""
+    age = status.get("lowstate_age_s")
+    weight = status.get("weight")
+    return bool(
+        status.get("accepted") is True
+        and status.get("state") == "READY"
+        and isinstance(age, (int, float))
+        and not isinstance(age, bool)
+        and math.isfinite(float(age))
+        and 0.0 <= float(age) < 0.15
+        and status.get("ownership_safe") is True
+        and status.get("external_writers") == 0
+        and isinstance(weight, (int, float))
+        and not isinstance(weight, bool)
+        and float(weight) == 0.0
+        and status.get("fault") is None
+        and "status_error" not in status
+    )
 
 
 class LocalResidentChannel:
@@ -239,14 +280,29 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                     "MOTIONDECODE RESULT: " + json.dumps(result, sort_keys=True),
                     flush=True,
                 )
+            self._last_result = result
             if self.real:
                 proof = bool(result.get("executed") and result.get("released"))
                 if self.resident:
-                    proof = proof and bool(
+                    cleanup_except_return = proof and bool(
                         result.get("motion_completed")
-                        and result.get("returned_to_q0")
                         and result.get("weight_zero")
                         and result.get("hard_fault") is None
+                    )
+                    if (cleanup_except_return
+                            and result.get("returned_to_q0") is False):
+                        post_status = self._channel.request({"operation": "status"})
+                        if _resident_postflight_is_safe(post_status):
+                            raise MotionDecodeSafeReturnMiss(
+                                reaction, result, post_status
+                            )
+                        raise RuntimeError(
+                            "Real MotionDecode safe-return miss has unsafe or "
+                            "ambiguous resident postflight: "
+                            + json.dumps(post_status, sort_keys=True)
+                        )
+                    proof = cleanup_except_return and bool(
+                        result.get("returned_to_q0")
                     )
                 else:
                     proof = proof and bool(result.get("returned_to_q0"))
@@ -273,7 +329,6 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                     + json.dumps(timing, sort_keys=True),
                     flush=True,
                 )
-            self._last_result = result
             self._last_succeeded = True
         finally:
             self._operation_lock.release()

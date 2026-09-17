@@ -9,6 +9,7 @@ import pytest
 
 from g1_bottle_reaction.adapters.motiondecode_reaction import (
     MotionDecodeReactionAdapter,
+    MotionDecodeSafeReturnMiss,
     parse_named_result,
 )
 
@@ -204,7 +205,6 @@ def test_resident_worker_unavailable_fails_without_cli_fallback(tmp_path: Path) 
     ("field", "value"),
     [
         ("motion_completed", False),
-        ("returned_to_q0", False),
         ("weight_zero", False),
         ("hard_fault", "tracking fault"),
     ],
@@ -234,6 +234,131 @@ def test_real_resident_requires_full_cleanup_proof(
         tmp_path, real=True, enabled=True, channel_factory=RealChannel)
     with pytest.raises(RuntimeError, match="lacks required cleanup proof"):
         adapter.play_motion("motiondecode:surprise")
+
+
+def real_result(reaction: str, **overrides) -> dict:
+    result = {
+        "accepted": True,
+        "state": "READY",
+        "reaction": reaction,
+        "status": "pass",
+        "executed": True,
+        "motion_completed": True,
+        "released": True,
+        "returned_to_q0": True,
+        "controlled_q0_return_error_rad": 0.02,
+        "weight_zero": True,
+        "hard_fault": None,
+    }
+    result.update(overrides)
+    return result
+
+
+def safe_resident_status(**overrides) -> dict:
+    status = {
+        "accepted": True,
+        "state": "READY",
+        "lowstate_age_s": 0.01,
+        "ownership_safe": True,
+        "external_writers": 0,
+        "weight": 0.0,
+        "fault": None,
+    }
+    status.update(overrides)
+    return status
+
+
+class ResultSequenceChannel:
+    def __init__(self, results, post_statuses=()):
+        self.results = list(results)
+        self.post_statuses = list(post_statuses)
+        self.requests = []
+
+    def request(self, payload):
+        self.requests.append(payload)
+        if payload["operation"] == "status":
+            if self.post_statuses:
+                return self.post_statuses.pop(0)
+            return safe_resident_status()
+        return self.results.pop(0)
+
+    def close(self):
+        pass
+
+
+def test_safe_return_miss_raises_typed_failure_then_allows_next_success(
+    tmp_path: Path,
+) -> None:
+    channel = ResultSequenceChannel([
+        real_result("found", returned_to_q0=False,
+                    controlled_q0_return_error_rad=0.0322),
+        real_result("joy"),
+    ])
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path, real=True, enabled=True, allow_hackathon_joy=True,
+        channel_factory=lambda: channel,
+    )
+
+    with pytest.raises(MotionDecodeSafeReturnMiss) as caught:
+        adapter.play_motion("motiondecode:found")
+    assert caught.value.reaction == "found"
+    assert caught.value.controlled_q0_return_error_rad == pytest.approx(0.0322)
+    assert caught.value.returned_to_q0 is False
+    assert caught.value.resident_status["state"] == "READY"
+    assert adapter.wait_for_motion_complete("motiondecode:found") is False
+
+    adapter.play_motion("motiondecode:joy")
+    assert adapter.wait_for_motion_complete("motiondecode:joy") is True
+    assert [request["operation"] for request in channel.requests] == [
+        "status", "execute", "status", "execute"
+    ]
+
+
+@pytest.mark.parametrize(
+    "unsafe_status",
+    [
+        safe_resident_status(state="FAULT", fault="resident fault"),
+        safe_resident_status(lowstate_age_s=0.15),
+        safe_resident_status(ownership_safe=False),
+        safe_resident_status(external_writers=1),
+        safe_resident_status(weight=0.01),
+    ],
+)
+def test_safe_return_miss_with_unsafe_postflight_is_hard_failure(
+    tmp_path: Path, unsafe_status: dict,
+) -> None:
+    channel = ResultSequenceChannel(
+        [real_result("found", returned_to_q0=False,
+                     controlled_q0_return_error_rad=0.0322)],
+        # First status constructs the adapter; second is the postflight.
+        [safe_resident_status(), unsafe_status],
+    )
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path, real=True, enabled=True, channel_factory=lambda: channel
+    )
+    with pytest.raises(RuntimeError, match="unsafe or ambiguous resident postflight"):
+        adapter.play_motion("motiondecode:found")
+
+
+def test_safe_return_miss_status_ipc_failure_remains_hard_failure(
+    tmp_path: Path,
+) -> None:
+    class StatusFailureChannel(ResultSequenceChannel):
+        def request(self, payload):
+            if payload["operation"] == "status" and self.requests:
+                self.requests.append(payload)
+                raise RuntimeError("status IPC failed")
+            return super().request(payload)
+
+    channel = StatusFailureChannel([
+        real_result("found", returned_to_q0=False,
+                    controlled_q0_return_error_rad=0.0322)
+    ])
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path, real=True, enabled=True, channel_factory=lambda: channel
+    )
+    with pytest.raises(RuntimeError, match="status IPC failed"):
+        adapter.play_motion("motiondecode:found")
 
 
 def test_real_adapter_rejects_unvalidated_joy_before_execute(tmp_path: Path) -> None:
