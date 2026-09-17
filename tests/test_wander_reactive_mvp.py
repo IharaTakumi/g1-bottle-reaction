@@ -76,6 +76,13 @@ def test_cli_defaults_to_no_command_dry_run(capsys):
     assert "NO G1 COMMAND SENT" in capsys.readouterr().out
 
 
+def test_duration_cli_selects_bounded_runtime_without_command(capsys):
+    assert SCRIPT.main(["--duration", "12"]) == 0
+    output = capsys.readouterr().out
+    assert "run=12.0" in output
+    assert "NO G1 COMMAND SENT" in output
+
+
 def test_open_front_sends_one_bounded_forward_and_stop():
     clock = FakeClock()
     client = FakeClient()

@@ -113,7 +113,9 @@ class JsonlReactiveTelemetry:
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--duration", "--run-seconds", dest="run_seconds", type=float,
+        default=30.0, help="bounded Wander runtime in seconds (maximum: 60)")
     parser.add_argument("--max-pulses", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--interface", default="eth0")
