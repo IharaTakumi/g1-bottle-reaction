@@ -89,6 +89,17 @@ class UnitreeSdkRuntime:
         client.Init()
         return client
 
+    def create_readonly_navigation_subscribers(self, odom_handler, cloud_handler):
+        """Create DataReader-only subscribers on the initialized SDK channel factory."""
+        configure_sdk_path()
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        schemas = self.load_readonly_navigation_types()
+        odom = ChannelSubscriber('rt/dog_odom', schemas['odometry'])
+        cloud = ChannelSubscriber('rt/utlidar/cloud_livox_mid360', schemas['point_cloud'])
+        odom.Init(odom_handler, 1)
+        cloud.Init(cloud_handler, 1)
+        return {'odom': odom, 'cloud': cloud}
+
     def create_slam_single_call_client(self, interface, timeout, api_id):
         if interface != 'eth0' or api_id not in (1801, 1802, 1804):
             raise ValueError('Only PC2 eth0 and single SLAM operations are supported')

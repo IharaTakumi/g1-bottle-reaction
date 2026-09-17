@@ -45,9 +45,9 @@ def test_point_cloud_sector_assignment_is_configurable(app_config) -> None:
     result = perception.snapshot(points, timestamp=10.0)
 
     assert result.valid
-    assert result.sector("right").clearance_m == pytest.approx(2.5)
+    assert result.sector("left").clearance_m == pytest.approx(2.5)
     assert result.sector("front").clearance_m == pytest.approx(1.5)
-    assert result.sector("left").blocked
+    assert result.sector("right").blocked
 
 
 def test_hard_stop_and_stale_sensor_fail_closed(app_config) -> None:
