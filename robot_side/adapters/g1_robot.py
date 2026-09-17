@@ -67,6 +67,28 @@ class UnitreeSdkRuntime:
             'string': String_,
         }
 
+    def create_loco_client(self, interface, timeout):
+        """Create the explicit one-shot G1 locomotion client."""
+        if interface != 'eth0':
+            raise ValueError('One-shot locomotion is restricted to PC2 eth0')
+        if timeout <= 0:
+            raise ValueError('Locomotion timeout must be positive')
+        require_runtime()
+        configure_sdk_path()
+        from unitree_sdk2py.core import channel
+        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+        with _lock:
+            previous = channel.ChannelConfigHasInterface
+            try:
+                channel.ChannelConfigHasInterface = DDS_XML
+                channel.ChannelFactoryInitialize(0, interface)
+            finally:
+                channel.ChannelConfigHasInterface = previous
+        client = LocoClient()
+        client.SetTimeout(timeout)
+        client.Init()
+        return client
+
     def create_slam_single_call_client(self, interface, timeout, api_id):
         if interface != 'eth0' or api_id not in (1801, 1802, 1804):
             raise ValueError('Only PC2 eth0 and single SLAM operations are supported')

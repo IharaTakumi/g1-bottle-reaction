@@ -1,0 +1,15 @@
+{
+  "forward_axis": "+x",
+  "left_axis": "+y",
+  "up_axis": "+z",
+  "min_height_m": 0.10,
+  "max_height_m": 1.60,
+  "min_range_m": 0.20,
+  "max_range_m": 4.00,
+  "self_mask_front_m": 0.45,
+  "self_mask_back_m": 0.35,
+  "self_mask_half_width_m": 0.40,
+  "sector_edges_degrees": [-90, -54, -18, 18, 54, 90],
+  "minimum_valid_points": 5,
+  "blocked_distance_m": 0.80
+}

@@ -14,6 +14,12 @@ python -m g1_bottle_reaction.main --wander-shadow --wander-seed 11
 See [the staged G1 validation procedure](docs/MAPLESS_WANDER_G1_VALIDATION.md)
 before connecting any future locomotion backend.
 
+The next-stage tools remain separate: `g1-wander-live-source.py` is a
+DataReader-only PC2 JSONL source consumed by `--wander-live`, while
+`g1-wander-loco-once.py` is dry-run by default and can issue at most one
+explicitly gated, hard-bounded command. No Wander decision is wired to
+locomotion.
+
 Windows 11上でWebカメラのペットボトルを検出し、時間方向の状態変化からMock Robotの動作表示とPC音声を発生させる先行プロトタイプです。現在の主開発環境は **Python 3.13** です。default起動ではUnitree G1へ接続せず、Phase 1実機経路だけを明示的なCLIで有効化します。
 
 対応Pythonは **3.10以上** です。通常のWindows開発環境はPython 3.13を維持し、公式`unitree_sdk2_python`と`cyclonedds==0.10.2`を使うG1用venvはPython 3.10を使用します。Python 3.10/3.11ではlegacy TeleImagerとも共存可能なNumPy 1.26系、Python 3.12以降ではNumPy 2系をdependency markerで選択します。

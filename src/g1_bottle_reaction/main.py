@@ -52,6 +52,7 @@ from g1_bottle_reaction.navigation.wander.shadow import (
     run_replay_shadow,
     run_synthetic_shadow,
 )
+from g1_bottle_reaction.navigation.wander.live import run_live_shadow
 from g1_bottle_reaction.reactions.engine import ReactionEngine
 from g1_bottle_reaction.reactions.models import Reaction
 from g1_bottle_reaction.simulation.motion import (
@@ -79,6 +80,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="JSONL",
         help="replay odometry and points/obstacle snapshots without robot commands",
+    )
+    parser.add_argument(
+        "--wander-live",
+        action="store_true",
+        help="consume read-only wander JSONL from stdin; never send robot commands",
+    )
+    parser.add_argument(
+        "--wander-record",
+        type=Path,
+        metavar="JSONL",
+        help="record valid live input for later --wander-replay",
+    )
+    parser.add_argument(
+        "--wander-live-debug",
+        action="store_true",
+        help="print source axis/self-mask diagnostics when present",
     )
     parser.add_argument(
         "--wander-seed",
@@ -401,10 +418,29 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config = load_config(args.config)
         config = _apply_custom_notice_overrides(config, args)
-        if args.wander_shadow or args.wander_replay is not None:
+        if (
+            args.wander_shadow
+            or args.wander_live
+            or args.wander_replay is not None
+            or args.wander_record is not None
+            or args.wander_live_debug
+        ):
             if args.robot != "mock" or args.enable_real_robot or args.enable_real_navigation:
                 raise ValueError(
                     "Mapless Wander shadow/replay is decision-only and rejects real robot/navigation flags"
+                )
+            if args.wander_record is not None and not args.wander_live:
+                raise ValueError("--wander-record requires --wander-live")
+            if args.wander_live_debug and not args.wander_live:
+                raise ValueError("--wander-live-debug requires --wander-live")
+            if args.wander_live:
+                if args.wander_replay is not None or args.wander_shadow:
+                    raise ValueError("--wander-live cannot be combined with shadow/replay")
+                return run_live_shadow(
+                    config.wander,
+                    record_path=args.wander_record,
+                    seed=args.wander_seed,
+                    debug=args.wander_live_debug,
                 )
             if args.wander_replay is not None:
                 count = run_replay_shadow(

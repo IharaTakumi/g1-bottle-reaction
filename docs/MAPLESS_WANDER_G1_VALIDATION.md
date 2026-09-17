@@ -14,6 +14,22 @@ YAML axis signs, usable height band, minimum range, and self mask from those
 observations. Confirm each physical obstacle lands in the matching shadow
 sector.
 
+On PC2, from the repository and its existing robot virtual environment:
+
+```bash
+source .venv-robot/bin/activate
+python scripts/g1-wander-live-source.py \
+  --interface eth0 \
+  --seconds 20 \
+  --debug-axis
+```
+
+This process creates DataReaders only for `rt/utlidar/cloud_livox_mid360` and
+`rt/dog_odom`. It has no application DataWriter, RPC client, or locomotion
+client. The checked-in `config/wander_live_pc2.json` values are unverified
+placeholders. Inspect `raw_xyz_min/max`, sector counts, and nearest xyz before
+changing them. Do not infer the real axes from their default names.
+
 ## STEP 2: LIVE SHADOW
 
 Still do not move G1. Place a person, chair, and wall in turn at the front,
@@ -28,6 +44,20 @@ python -m g1_bottle_reaction.main --wander-shadow --wander-seed 11
 python -m g1_bottle_reaction.main --wander-replay .runtime\wander.jsonl --wander-seed 11
 ```
 
+For the actual read-only pipe, replace `<pc2-host>` and the repository path for
+the venue environment; do not put passwords in the repository:
+
+```powershell
+ssh <pc2-host> "cd ~/dev/g1-bottle-reaction && source .venv-robot/bin/activate && python scripts/g1-wander-live-source.py --interface eth0 --debug-axis" |
+  python -m g1_bottle_reaction.main --wander-live --wander-seed 11 --wander-live-debug --wander-record .runtime\wander_live_20260917.jsonl
+```
+
+The desktop prints cloud/odometry age, all five clearances, safety state,
+action, and reason. Malformed input, missing data, stale data, an unexpected
+exception, or SSH EOF is shown as `ACTION=STOP`. Stop here unless the physical
+front/left/right placements agree with their sectors and every failure test is
+fail-closed. The record is directly accepted by `--wander-replay`.
+
 Replay uses one JSON object per line:
 
 ```json
@@ -40,11 +70,43 @@ adapter.
 
 ## STEP 3: ONE-SHOT LOCOMOTION
 
-Only after STEP 2 passes, use a separately reviewed, explicitly armed motion
-path in a wide controlled area. Verify one command at a time: very-low-speed
-forward, short left turn, short right turn, then stop. Record command direction,
-latency, and actual stopping behavior. The daytime shadow runtime does not
-provide this command path.
+Only after STEP 2 passes, use the independent one-shot harness in a wide,
+controlled area. First copy/paste these dry runs; they initialize no SDK and
+send no command:
+
+```bash
+python scripts/g1-wander-loco-once.py --action forward --speed 0.05 --duration 0.30
+python scripts/g1-wander-loco-once.py --action turn-left --speed 0.05 --duration 0.30
+python scripts/g1-wander-loco-once.py --action turn-right --speed 0.05 --duration 0.30
+python scripts/g1-wander-loco-once.py --action stop
+```
+
+Each must print `DRY RUN` and `NO G1 COMMAND SENT`. For a real single command,
+all four gates are required. Add them only after the operator has cleared the
+area and selected exactly one action:
+
+```bash
+python scripts/g1-wander-loco-once.py \
+  --robot g1 \
+  --enable-real-robot \
+  --execute-real-g1 \
+  --i-understand-this-will-move-the-robot \
+  --action forward \
+  --speed 0.05 \
+  --duration 0.30
+```
+
+Repeat as separate processes for `turn-left`, `turn-right`, then `stop`. Never
+paste all real commands as a batch. The allowlist has no backward, side-step,
+continuous, loop, follow, or combined translation/rotation action. Hard limits
+are 0.10 m/s linear, 0.25 rad/s angular, and 0.50 s duration; out-of-range CLI
+values are rejected. One invocation sends at most one `SetVelocity` or
+`StopMove` mutation and never retries, including RPC timeout 3104.
+
+The duration field and an RPC return are not proof of physical stop. Observe
+actual direction, start latency, the explicit `stop` action, physical stopping
+latency, and stopping distance. Stop the validation if any is uncertain. The
+one-shot harness is deliberately not connected to `WanderDecision`.
 
 ## STEP 4: REACTIVE AVOIDANCE
 
