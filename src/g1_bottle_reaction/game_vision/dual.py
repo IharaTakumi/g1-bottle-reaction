@@ -223,12 +223,20 @@ def validate_args(args):
             raise ValueError(
                 "Real MotionDecode requires --enable-real-robot --confirm-site-ready"
             )
-        if args.enable_real_robot and not args.quiet_mode:
-            raise ValueError("Real plushie reaction requires --quiet-mode")
     elif args.enable_real_robot or args.g1_motion != "disabled":
         raise ValueError("Real robot safety flags require --robot g1")
     if args.confirm_site_ready and args.robot != "motiondecode":
         raise ValueError("--confirm-site-ready is restricted to --robot motiondecode")
+    if args.allow_hackathon_joy:
+        if (args.robot != "motiondecode" or not args.enable_real_robot
+                or not args.confirm_site_ready):
+            raise ValueError(
+                "--allow-hackathon-joy requires real attended MotionDecode"
+            )
+        if args.reaction_target not in {"all", "plushie"}:
+            raise ValueError(
+                "--allow-hackathon-joy is restricted to plushie-capable targets"
+            )
     if args.execute_real_action and args.robot != "g1-ssh":
         raise ValueError("--execute-real-action is restricted to --robot g1-ssh")
     if any((args.publish_processed, args.publish_safety, args.vision_preset, args.fog_mode,
@@ -354,7 +362,6 @@ def run(args):
                 FoundGate,
                 FoundReactionController,
                 select_audio_trigger,
-                select_plushie_only_trigger,
             )
             from g1_bottle_reaction.adapters.cached_audio import G1SshAudioOutput, LinuxAplayOutput
             from g1_bottle_reaction.adapters.g1_robot import G1RobotAdapter
@@ -418,15 +425,25 @@ def run(args):
                     timeout_seconds=args.motiondecode_timeout,
                     resident=True,
                     socket_path=args.motiondecode_socket,
+                    allow_hackathon_joy=args.allow_hackathon_joy,
                     fallback=MockRobotAdapter(),
                 )
             else:
                 robot = MockRobotAdapter()
-            motion_overrides = (
-                {"plushie": "motiondecode:surprise"}
-                if args.robot == "motiondecode"
-                else None
-            )
+            if args.robot == "motiondecode":
+                motion_overrides = {
+                    "person": "motiondecode:found",
+                    "banana": "motiondecode:surprise",
+                    "plushie": "motiondecode:joy",
+                }
+                speech_delay_overrides = {
+                    "person": 0.0,
+                    "banana": 0.0,
+                    "plushie": 0.0,
+                }
+            else:
+                motion_overrides = None
+                speech_delay_overrides = None
             reaction = FoundReactionController(
                 {
                     "person": found_settings,
@@ -438,14 +455,14 @@ def run(args):
                 base_reaction=core_config.reaction.items[ReactionEvent.FOUND.value],
                 cooldown_seconds=core_config.reaction.cooldown_seconds,
                 motion_overrides=motion_overrides,
-                speech_delay_overrides={"plushie": 0.0},
+                speech_delay_overrides=speech_delay_overrides,
             )
             print(f"FOUND REACTION: robot={args.robot}, output={found_settings.output}, "
                   f"motion=notice, files={len(found_settings.sounds)}, "
                   f"duration={gate.duration}s, grace={gate.grace}s, cooldown={gate.cooldown}s, "
                   f"rearm absence={gate.rearm_absence}s; ONCE UNTIL PERSON LEAVES", flush=True)
             print(f"BANANA AUDIO: files={len(banana_settings.sounds)}, duration={banana_gate.duration}s, "
-                  f"priority=PERSON; ONCE UNTIL BANANA LEAVES", flush=True)
+                  f"priority=PLUSHIE>BANANA>PERSON; ONCE UNTIL BANANA LEAVES", flush=True)
             print(f"PLUSHIE AUDIO: files={len(plushie_settings.sounds)}, duration={plushie_gate.duration}s, "
                   f"YOLO class=77 teddy bear; motion="
                   f"{motion_overrides['plushie'] if motion_overrides else 'notice'}; "
@@ -543,24 +560,16 @@ def run(args):
                         max_age=plushie_gate.grace,
                     )
                     busy = reaction.busy or bool(reaction.audio_error)
-                    if args.robot == "motiondecode":
-                        trigger = select_plushie_only_trigger(
-                            plushie_detection,
-                            now,
-                            plushie_gate,
-                            audio_busy=busy,
-                        )
-                    else:
-                        trigger = select_audio_trigger(
-                            detection,
-                            now,
-                            gate,
-                            banana_gate,
-                            plushie_gate,
-                            audio_busy=busy,
-                            plushie_result=plushie_detection,
-                            reaction_target=args.reaction_target,
-                        )
+                    trigger = select_audio_trigger(
+                        detection,
+                        now,
+                        gate,
+                        banana_gate,
+                        plushie_gate,
+                        audio_busy=busy,
+                        plushie_result=plushie_detection,
+                        reaction_target=args.reaction_target,
+                    )
                     if trigger == "person":
                         if reaction.trigger(trigger, now):
                             print(f"PERSON REACTION TRIGGER: cooldown {gate.cooldown:.2f}s", flush=True)

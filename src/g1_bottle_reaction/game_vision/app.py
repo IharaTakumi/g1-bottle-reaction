@@ -147,6 +147,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="explicit attended-site gate for real MotionDecode reactions",
     )
+    parser.add_argument(
+        "--allow-hackathon-joy",
+        action="store_true",
+        help=(
+            "explicit attended-only gate for real plushie JOY; does not change "
+            "global MotionDecode validation metadata"
+        ),
+    )
     parser.add_argument("--g1-stream-host", help="PC2 host publishing processed game images")
     parser.add_argument("--g1-stream-port", type=int, help="processed TeleImager ZMQ port")
     parser.add_argument(

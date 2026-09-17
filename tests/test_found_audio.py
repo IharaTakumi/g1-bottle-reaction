@@ -62,7 +62,7 @@ def object_detection(stamp, *, person=False, banana=False, plushie=False):
         stamp=stamp, status='RUNNING')
 
 
-def test_person_has_priority_when_person_and_banana_are_both_visible():
+def test_banana_has_priority_when_person_and_banana_are_both_visible():
     person_gate = FoundGate()
     banana_gate = FoundGate(object_attribute='bananas')
     selected = []
@@ -71,8 +71,8 @@ def test_person_has_priority_when_person_and_banana_are_both_visible():
                                        t, person_gate, banana_gate)
         if trigger:
             selected.append(trigger)
-    assert selected == ['person']
-    assert banana_gate.state == 'DETECTING'
+    assert selected == ['banana']
+    assert person_gate.state == 'DETECTING'
 
 
 def test_banana_triggers_once_when_no_person_then_waits_until_clear():
@@ -102,7 +102,7 @@ def test_plushie_plays_its_audio_once_using_teddy_bear_detection():
     assert plushie_gate.waiting_clear
 
 
-def test_existing_audio_priority_extends_to_plushie_without_overlap():
+def test_plushie_has_priority_over_banana_and_person():
     person_gate = FoundGate()
     banana_gate = FoundGate(object_attribute='bananas')
     plushie_gate = FoundGate(object_attribute='plushies')
@@ -113,10 +113,10 @@ def test_existing_audio_priority_extends_to_plushie_without_overlap():
             t, person_gate, banana_gate, plushie_gate)
         if trigger:
             selected.append(trigger)
-    assert selected == ['person']
+    assert selected == ['plushie']
 
 
-def test_banana_suppresses_plushie_when_both_stay_visible():
+def test_plushie_suppresses_banana_when_both_stay_visible():
     person_gate = FoundGate()
     banana_gate = FoundGate(object_attribute='bananas')
     plushie_gate = FoundGate(object_attribute='plushies')
@@ -127,7 +127,7 @@ def test_banana_suppresses_plushie_when_both_stay_visible():
             t, person_gate, banana_gate, plushie_gate)
         if trigger:
             selected.append(trigger)
-    assert selected == ['banana']
+    assert selected == ['plushie']
 
 
 def test_confirmation_cooldown_and_fresh_reconfirmation():

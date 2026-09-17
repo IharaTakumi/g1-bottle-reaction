@@ -104,6 +104,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         ssh_control: str | None = None,
         timeout_seconds: float = 420.0,
         attended_real: bool = False,
+        allow_hackathon_joy: bool = False,
         python: Path | None = None,
         environ: dict[str, str] | None = None,
         run_factory: Callable[..., Any] = subprocess.run,
@@ -117,6 +118,8 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             raise RuntimeError("Real MotionDecode requires explicit real-robot enable")
         if attended_real and not real:
             raise ValueError("Attended gate is valid only for real MotionDecode")
+        if allow_hackathon_joy and not real:
+            raise ValueError("Hackathon JOY gate is valid only for real MotionDecode")
         if transport not in {"local", "ssh"}:
             raise ValueError("MotionDecode transport must be local or ssh")
         if timeout_seconds <= 0:
@@ -129,6 +132,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self.ssh_control = ssh_control
         self.timeout_seconds = timeout_seconds
         self.attended_real = attended_real
+        self.allow_hackathon_joy = bool(allow_hackathon_joy)
         self.python = python or self.repository / ".venv" / "bin" / "python"
         self.environ = environ
         self._run_factory = run_factory
@@ -193,9 +197,14 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             return
         if self._shutdown.is_set():
             raise RuntimeError("MotionDecode adapter is shutting down")
-        if self.real and reaction not in REAL_G1_VALIDATED_REACTIONS:
+        hackathon_joy_allowed = (
+            reaction == "joy" and self.allow_hackathon_joy
+        )
+        if (self.real and reaction not in REAL_G1_VALIDATED_REACTIONS
+                and not hackathon_joy_allowed):
             raise RuntimeError(
-                f"MotionDecode reaction is not validated for real G1: {reaction}"
+                f"MotionDecode reaction is not validated for real G1: {reaction}; "
+                "JOY requires the explicit hackathon allow gate"
             )
         if not self._operation_lock.acquire(blocking=False):
             raise RuntimeError("Another robot motion is already executing")
@@ -223,10 +232,22 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                           if self.attended_real else parse_named_result(completed.stdout))
             if result.get("reaction") != reaction or result.get("status") != "pass":
                 raise RuntimeError(f"MotionDecode CLI returned failure: {result}")
+            if self.real and self.resident:
+                # Preserve the complete fail-closed evidence even when a
+                # cleanup field below rejects the result.
+                print(
+                    "MOTIONDECODE RESULT: " + json.dumps(result, sort_keys=True),
+                    flush=True,
+                )
             if self.real:
                 proof = bool(result.get("executed") and result.get("released"))
                 if self.resident:
-                    proof = proof and bool(result.get("weight_zero"))
+                    proof = proof and bool(
+                        result.get("motion_completed")
+                        and result.get("returned_to_q0")
+                        and result.get("weight_zero")
+                        and result.get("hard_fault") is None
+                    )
                 else:
                     proof = proof and bool(result.get("returned_to_q0"))
                 if not proof:

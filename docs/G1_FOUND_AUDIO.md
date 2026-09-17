@@ -8,7 +8,7 @@ G1の既存Python 3.8、unitree_sdk2py、cycloneddsを使用し、G1へファイ
 音量はユーザー指定で85。カメラサービス/SDK/system設定には変更を加えていません。
 
 Reactionは明示的に `--found-audio` を指定した場合だけ有効です。G1内蔵カメラのYOLO結果だけを使います。
-person、banana、plushieを同時検出した場合はperson → banana → plushieの順に優先し、
+person、banana、plushieを同時検出した場合はplushie → banana → personの順に優先し、
 音声やmotionを重ねたりqueueへ溜めたりしません。plushieはYOLO COCOの`teddy bear`（class 77）を意味します。
 object音声の再生中に高優先度の対象が現れた場合は、再生を途中で切らず、終了後に判定します。
 従来のカメラreader・YOLO worker・USB表示と固定WAVを維持し、発火先を初期実装から残る
@@ -56,13 +56,12 @@ plushieは0.3秒継続、1.0秒dropout grace、2秒cooldown、3秒の明示的�
 
 ## Plushie AFFECTION / JOY minimal integration
 
-`--robot motiondecode` を選んだ場合だけ、confirmed plushie eventを既存の
-`ReactionEvent.YOLO_PLUSHIE_FOUND`として共有Reaction Engineへ渡し、実機validated済みの
-`motiondecode:surprise`（上半身 arms 50% / waist 25%、脚trajectoryなし）と
-`plushie_affectionate.wav`を同じjobから並列開始します。`motiondecode:joy`は所有runtimeで
-`real_g1_validated=false`のため実機経路ではfail-closedです。
-この新規modeではperson/bananaは表示・ログだけに残し、Reaction選択には入れません。
-既存robot modeのperson → banana → plushie優先規則はそのままです。
+`--robot motiondecode` を選んだ場合、confirmed object eventを既存の
+`ReactionEvent.YOLO_*_FOUND`として共有Reaction Engineへ渡し、
+person=`motiondecode:found`、banana=`motiondecode:surprise`、
+plushie=`motiondecode:joy`とそれぞれの既存WAVを同じjobから並列開始します。
+実機実行は所有runtime側で`real_g1_validated=true`のreactionだけに限定し、未validated motionは
+adapterとresidentの両方でfail-closedです。全対象modeの優先順はplushie → banana → personです。
 
 wireless G1 JPEG経路で実測した低い有効frame rateに対し、confirmation thresholdは
 0.3秒のまま、plushieだけdropout graceを1.0秒、rearm連続陰性を3.0秒にします。同一resultの再利用は拒否され、
@@ -71,7 +70,12 @@ camera/YOLO停止・stale・新規観測なしでは不在時間を進めませ�
 
 `--quiet-mode`は再生用の一時PCMだけを`config/yolo_objects.yaml`の
 `quiet_mode_gain_db`（会場調整値 -24 dB）で減衰します。元WAVとOS/G1のvolume設定は変更しません。
-実機MotionDecodeでは`--enable-real-robot --confirm-site-ready --quiet-mode`をすべて必須とします。
+実機MotionDecodeでは`--enable-real-robot --confirm-site-ready`を必須とします。
+`--quiet-mode`指定時だけ音声を-24 dB減衰し、未指定時は元WAVを通常音量で再生します。
+
+実機の`motiondecode:joy`はglobal metadataを変更せずfail-closedを維持します。
+attended hackathon実行でplushieまたはallを選ぶ場合に限り、
+`--allow-hackathon-joy`を明示してください。既定値はOFFです。
 固定音声なら `--found-sound /absolute/path.wav`。存在・非空PCM WAVを起動前に検証します。
 
 ユーザーの指定により、既定出力は**G1本体スピーカー**です。

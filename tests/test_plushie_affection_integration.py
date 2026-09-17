@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import threading
 import time
@@ -28,6 +29,7 @@ from g1_bottle_reaction.game_vision.person_yolo import (
     Plushie,
 )
 from g1_bottle_reaction.reactions.models import Reaction
+from g1_bottle_reaction.state.events import ReactionEvent
 
 
 def plushie_detection(stamp: float, visible: bool = True) -> Detection:
@@ -60,6 +62,14 @@ class BlockingRobot(RobotAdapter):
         assert self.release.wait(timeout=2)
 
 
+class RecordingRobot(RobotAdapter):
+    def __init__(self) -> None:
+        self.motions: list[str] = []
+
+    def play_motion(self, motion: str) -> None:
+        self.motions.append(motion)
+
+
 def settings() -> FoundSettings:
     return FoundSettings(
         confidence=0.25,
@@ -75,13 +85,21 @@ def settings() -> FoundSettings:
 def controller(robot: RobotAdapter, output: RecordingOutput) -> FoundReactionController:
     configured = settings()
     return FoundReactionController(
-        {"plushie": configured},
+        {
+            "person": replace(configured, sounds=(Path("person.wav"),)),
+            "banana": replace(configured, sounds=(Path("banana.wav"),)),
+            "plushie": configured,
+        },
         output,
         robot,
         base_reaction=Reaction("FOUND", "notice", "unused", 0.3),
         cooldown_seconds=0.0,
-        motion_overrides={"plushie": "motiondecode:surprise"},
-        speech_delay_overrides={"plushie": 0.0},
+        motion_overrides={
+            "person": "motiondecode:found",
+            "banana": "motiondecode:surprise",
+            "plushie": "motiondecode:joy",
+        },
+        speech_delay_overrides={"person": 0.0, "banana": 0.0, "plushie": 0.0},
     )
 
 
@@ -250,7 +268,7 @@ def test_plushie_only_mode_is_not_inhibited_by_person_boxes() -> None:
     assert select_plushie_only_trigger(result, 1.4, gate) == "plushie"
 
 
-def test_reaction_target_defaults_to_all_and_preserves_priority() -> None:
+def test_reaction_target_defaults_to_all_and_uses_prop_first_priority() -> None:
     parser = build_parser()
     assert parser.parse_args([]).reaction_target == "all"
     person_gate = FoundGate()
@@ -270,10 +288,11 @@ def test_reaction_target_defaults_to_all_and_preserves_priority() -> None:
         )
         if trigger:
             selected.append(trigger)
-    assert selected == ["person"]
+    assert selected == ["plushie"]
 
 
-def test_reaction_target_plushie_blocks_person_and_banana_but_allows_plushie() -> None:
+@pytest.mark.parametrize("target", ["person", "banana", "plushie"])
+def test_reaction_target_isolates_each_object(target: str) -> None:
     person_gate = FoundGate()
     banana_gate = FoundGate(object_attribute="bananas")
     plushie_gate = FoundGate(object_attribute="plushies")
@@ -292,13 +311,18 @@ def test_reaction_target_plushie_blocks_person_and_banana_but_allows_plushie() -
             person_gate,
             banana_gate,
             plushie_gate,
-            reaction_target="plushie",
+            reaction_target=target,
         )
         if trigger:
             selected.append(trigger)
-    assert selected == ["plushie"]
-    assert person_gate.state == "SEARCHING"
-    assert banana_gate.state == "SEARCHING"
+    assert selected == [target]
+    gates = {
+        "person": person_gate,
+        "banana": banana_gate,
+        "plushie": plushie_gate,
+    }
+    assert all(gate.state == "SEARCHING" for name, gate in gates.items()
+               if name != target)
 
 
 def test_camera_lost_cannot_create_a_plushie_reaction() -> None:
@@ -322,7 +346,35 @@ def test_camera_lost_cannot_create_a_plushie_reaction() -> None:
     assert plushie_gate.state == "SEARCHING"
 
 
-def test_plushie_motion_and_audio_start_in_parallel_and_busy_events_drop() -> None:
+def test_three_target_motion_mapping_and_zero_speech_delay() -> None:
+    robot = RecordingRobot()
+    output = RecordingOutput()
+    subject = controller(robot, output)
+    try:
+        for index, target in enumerate(("person", "banana", "plushie"), start=1):
+            assert subject.trigger(target, float(index))
+            wait_idle(subject)
+        assert robot.motions == [
+            "motiondecode:found",
+            "motiondecode:surprise",
+            "motiondecode:joy",
+        ]
+        assert output.played == [
+            Path("person.wav"),
+            Path("banana.wav"),
+            Path("plushie_affectionate.wav"),
+        ]
+        for event in (
+            ReactionEvent.YOLO_PERSON_FOUND,
+            ReactionEvent.YOLO_BANANA_FOUND,
+            ReactionEvent.YOLO_PLUSHIE_FOUND,
+        ):
+            assert subject.engine.config.items[event.value].speech_delay_seconds == 0.0
+    finally:
+        subject.close()
+
+
+def test_motion_and_audio_start_in_parallel_and_busy_events_drop() -> None:
     robot = BlockingRobot()
     output = RecordingOutput()
     subject = controller(robot, output)
@@ -332,7 +384,7 @@ def test_plushie_motion_and_audio_start_in_parallel_and_busy_events_drop() -> No
         assert output.started.wait(timeout=1)
         assert subject.busy
         assert not subject.trigger("plushie", 2.0)
-        assert robot.motions == ["motiondecode:surprise"]
+        assert robot.motions == ["motiondecode:joy"]
         assert output.played == [Path("plushie_affectionate.wav")]
         robot.release.set()
         wait_idle(subject)
@@ -341,7 +393,9 @@ def test_plushie_motion_and_audio_start_in_parallel_and_busy_events_drop() -> No
         subject.close()
 
 
-def test_quiet_mode_attenuates_only_playback_copy_by_30_db(tmp_path: Path) -> None:
+def test_quiet_mode_attenuates_only_playback_copy_by_configured_24_db(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "plushie_affectionate.wav"
     samples = np.full(1600, 20_000, dtype="<i2")
     with wave.open(str(source), "wb") as stream:
@@ -365,12 +419,14 @@ def test_quiet_mode_attenuates_only_playback_copy_by_30_db(tmp_path: Path) -> No
             pass
 
     delegate = CapturingOutput()
-    quiet = AttenuatedWavOutput(delegate, -30.0)
+    root = Path(__file__).resolve().parents[1]
+    gain_db = load_quiet_gain_db(root)
+    quiet = AttenuatedWavOutput(delegate, gain_db)
     try:
         quiet.play_wav(source)
         assert delegate.path != source
         assert np.max(np.abs(delegate.samples)) / 20_000 == pytest.approx(
-            10 ** (-30 / 20), abs=0.0001
+            10 ** (gain_db / 20), abs=0.0001
         )
         assert source.read_bytes() == original
     finally:
@@ -399,7 +455,7 @@ def test_commissioning_plushie_rearm_uses_three_seconds_explicit_absence() -> No
     assert configured.absence_blocking_overlap == 0.1
 
 
-def test_real_plushie_path_requires_attended_gate_and_quiet_mode() -> None:
+def test_real_motiondecode_requires_attended_gate_but_quiet_mode_is_optional() -> None:
     parser = build_parser()
     base = [
         "--source",
@@ -412,8 +468,25 @@ def test_real_plushie_path_requires_attended_gate_and_quiet_mode() -> None:
     ]
     with pytest.raises(ValueError, match="confirm-site-ready"):
         validate_args(parser.parse_args(base))
-    with pytest.raises(ValueError, match="quiet-mode"):
-        validate_args(parser.parse_args(base + ["--confirm-site-ready"]))
-    validate_args(
-        parser.parse_args(base + ["--confirm-site-ready", "--quiet-mode"])
-    )
+    validate_args(parser.parse_args(base + ["--confirm-site-ready"]))
+    validate_args(parser.parse_args(base + ["--confirm-site-ready", "--quiet-mode"]))
+
+
+def test_hackathon_joy_cli_gate_is_explicit_and_plushie_scoped() -> None:
+    parser = build_parser()
+    base = [
+        "--source", "dual", "--yolo", "--found-audio",
+        "--robot", "motiondecode", "--enable-real-robot",
+        "--confirm-site-ready",
+    ]
+    assert parser.parse_args(base).allow_hackathon_joy is False
+    validate_args(parser.parse_args(
+        base + ["--reaction-target", "plushie", "--allow-hackathon-joy"]
+    ))
+    validate_args(parser.parse_args(
+        base + ["--reaction-target", "all", "--allow-hackathon-joy"]
+    ))
+    with pytest.raises(ValueError, match="plushie-capable"):
+        validate_args(parser.parse_args(
+            base + ["--reaction-target", "person", "--allow-hackathon-joy"]
+        ))

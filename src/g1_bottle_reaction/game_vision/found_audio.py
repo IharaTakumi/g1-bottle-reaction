@@ -339,7 +339,7 @@ def select_audio_trigger(
     plushie_result=None,
     reaction_target="all",
 ):
-    """Choose at most one reaction in person, banana, plushie priority order."""
+    """Choose at most one reaction in plushie, banana, person priority order."""
     plushie_result = result if plushie_result is None else plushie_result
     if reaction_target == "person":
         return "person" if person_gate.update(
@@ -357,20 +357,20 @@ def select_audio_trigger(
         )
     if reaction_target != "all":
         raise ValueError(f"Unknown reaction target: {reaction_target}")
-    if person_gate.update(result, now, audio_busy=audio_busy):
-        banana_gate.update(result, now, audio_busy=True, inhibit=True)
-        if plushie_gate is not None:
-            plushie_gate.update(plushie_result, now, audio_busy=True, inhibit=True)
-        return "person"
-    if banana_gate.update(result, now, audio_busy=audio_busy,
-                          inhibit=bool(result.people)):
-        if plushie_gate is not None:
-            plushie_gate.update(plushie_result, now, audio_busy=True, inhibit=True)
-        return "banana"
     if plushie_gate is not None and plushie_gate.update(
-            plushie_result, now, audio_busy=audio_busy,
-            inhibit=bool(result.people or result.bananas)):
+            plushie_result, now, audio_busy=audio_busy):
+        banana_gate.update(result, now, audio_busy=True, inhibit=True)
+        person_gate.update(result, now, audio_busy=True, inhibit=True)
         return "plushie"
+    plushie_visible = bool(plushie_result.plushies)
+    if banana_gate.update(
+            result, now, audio_busy=audio_busy, inhibit=plushie_visible):
+        person_gate.update(result, now, audio_busy=True, inhibit=True)
+        return "banana"
+    if person_gate.update(
+            result, now, audio_busy=audio_busy,
+            inhibit=bool(plushie_visible or result.bananas)):
+        return "person"
     return None
 
 

@@ -200,18 +200,40 @@ def test_resident_worker_unavailable_fails_without_cli_fallback(tmp_path: Path) 
         MotionDecodeReactionAdapter(tmp_path, channel_factory=NotReady)
 
 
-def test_real_resident_uses_weight_zero_cleanup_proof(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("motion_completed", False),
+        ("returned_to_q0", False),
+        ("weight_zero", False),
+        ("hard_fault", "tracking fault"),
+    ],
+)
+def test_real_resident_requires_full_cleanup_proof(
+    tmp_path: Path, field: str, value: object
+) -> None:
     class RealChannel(FakeResidentChannel):
         def request(self, payload):
             if payload["operation"] == "status":
                 return {"accepted": True, "state": "READY"}
-            return {"accepted": True, "state": "READY", "reaction": payload["reaction"],
-                    "status": "pass", "executed": True, "released": True,
-                    "weight_zero": True, "returned_to_q0": False}
+            result = {
+                "accepted": True,
+                "state": "READY",
+                "reaction": payload["reaction"],
+                "status": "pass",
+                "executed": True,
+                "motion_completed": True,
+                "released": True,
+                "weight_zero": True,
+                "returned_to_q0": True,
+                "hard_fault": None,
+            }
+            result[field] = value
+            return result
     adapter = MotionDecodeReactionAdapter(
         tmp_path, real=True, enabled=True, channel_factory=RealChannel)
-    adapter.play_motion("motiondecode:surprise")
-    assert adapter.wait_for_motion_complete("motiondecode:surprise")
+    with pytest.raises(RuntimeError, match="lacks required cleanup proof"):
+        adapter.play_motion("motiondecode:surprise")
 
 
 def test_real_adapter_rejects_unvalidated_joy_before_execute(tmp_path: Path) -> None:
@@ -225,3 +247,46 @@ def test_real_adapter_rejects_unvalidated_joy_before_execute(tmp_path: Path) -> 
     with pytest.raises(RuntimeError, match="not validated for real G1: joy"):
         adapter.play_motion("motiondecode:joy")
     assert [request["operation"] for request in channel.requests] == ["status"]
+
+
+def test_real_adapter_allows_joy_only_with_explicit_hackathon_gate(tmp_path: Path) -> None:
+    class RealJoyChannel(FakeResidentChannel):
+        def request(self, payload):
+            self.requests.append(payload)
+            if payload["operation"] == "status":
+                return {"accepted": True, "state": "READY"}
+            return {
+                "accepted": True,
+                "state": "READY",
+                "reaction": payload["reaction"],
+                "status": "pass",
+                "executed": True,
+                "motion_completed": True,
+                "released": True,
+                "returned_to_q0": True,
+                "weight_zero": True,
+                "hard_fault": None,
+            }
+
+    channel = RealJoyChannel()
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path,
+        real=True,
+        enabled=True,
+        allow_hackathon_joy=True,
+        channel_factory=lambda: channel,
+    )
+    adapter.play_motion("motiondecode:joy")
+    assert adapter.wait_for_motion_complete("motiondecode:joy")
+    assert [request["operation"] for request in channel.requests] == [
+        "status", "execute"
+    ]
+
+
+def test_hackathon_joy_gate_is_rejected_for_dry_run(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="only for real MotionDecode"):
+        MotionDecodeReactionAdapter(
+            tmp_path,
+            allow_hackathon_joy=True,
+            resident=False,
+        )
