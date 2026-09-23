@@ -204,6 +204,11 @@ def validate_args(args):
         raise ValueError("--max-frames must be positive")
     if not math.isfinite(args.motiondecode_timeout) or args.motiondecode_timeout <= 0:
         raise ValueError("--motiondecode-timeout must be finite and positive")
+    if args.with_wander:
+        if not args.found_audio:
+            raise ValueError("--with-wander requires --found-audio")
+        if not args.wander_ssh_target:
+            raise ValueError("--with-wander requires --wander-ssh-target")
     if args.robot in {"g1", "g1-ssh"}:
         if not args.found_audio:
             raise ValueError("real robot adapters require --found-audio")
@@ -336,6 +341,7 @@ def run(args):
         raise RuntimeError("A desktop session is required; otherwise use --headless")
     readers = {}
     yolo = None
+    wander = None
     reaction = gate = banana_gate = plushie_gate = None
     found_label = None
     boxes = True
@@ -355,6 +361,17 @@ def run(args):
     report_display_count = 0
     first_display = None
     try:
+        if args.with_wander:
+            from .wander_interlock import RemoteWanderController
+
+            wander_control = (
+                args.ssh_control if args.wander_ssh_target == ssh_target else None
+            )
+            wander = RemoteWanderController(
+                args.wander_ssh_target,
+                args.wander_remote_dir,
+                ssh_control=wander_control,
+            )
         if found_settings:
             from .found_audio import (
                 AttenuatedWavOutput,
@@ -456,6 +473,8 @@ def run(args):
                 cooldown_seconds=core_config.reaction.cooldown_seconds,
                 motion_overrides=motion_overrides,
                 speech_delay_overrides=speech_delay_overrides,
+                wander=wander,
+                reaction_completion_timeout=args.motiondecode_timeout + 5.0,
             )
             print(f"FOUND REACTION: robot={args.robot}, output={found_settings.output}, "
                   f"motion=notice, files={len(found_settings.sounds)}, "
@@ -510,6 +529,21 @@ def run(args):
             usb_sender = start_sender(args, ssh_target, route_interface)
         if args.g1_camera_transport == "ssh-rtp":
             g1_sender = start_g1_camera_sender(args, ssh_target)
+        if wander is not None:
+            try:
+                wander.start()
+            except Exception as exc:
+                print(
+                    f"WANDER START FAILED: {exc}; reactions remain inhibited",
+                    flush=True,
+                )
+                try:
+                    wander.close()
+                except Exception as cleanup_exc:
+                    print(
+                        f"WANDER START CLEANUP FAILED: {cleanup_exc}",
+                        flush=True,
+                    )
         if not args.headless:
             cv2.namedWindow(window, cv2.WINDOW_NORMAL)
             opened = True
@@ -643,6 +677,8 @@ def run(args):
         try:
             if reaction:
                 reaction.close()
+            elif wander:
+                wander.close()
         finally:
             try:
                 for sender in (usb_sender, g1_sender):

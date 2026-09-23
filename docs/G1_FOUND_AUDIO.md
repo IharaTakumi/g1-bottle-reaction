@@ -132,6 +132,17 @@ ssh -M -S /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-contr
 G1_ALLOW_REAL_ACTION=1 /home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 10.42.0.1 --usb-host 10.42.0.76 --network-interface wlp128s20f3 --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control --g1-camera-transport ssh-rtp --g1-camera-port 56001 --g1-camera-fps 30 --no-usb-camera --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --plushie-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0 --robot g1-ssh --enable-real-robot --g1-motion safe-actions --execute-real-action
 ```
 
+Mapless Wanderとのゲーム統合は、同じ実機確認済みオプションへ明示的なinterlockだけを追加します。
+PC2側で`wip/mapless-wander-real-g1-20260917`をcheckout済みの場合の起動コマンドは次の1本です。
+
+```bash
+G1_ALLOW_REAL_ACTION=1 /home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 10.42.0.1 --usb-host 10.42.0.76 --network-interface wlp128s20f3 --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control --g1-camera-transport ssh-rtp --g1-camera-port 56001 --g1-camera-fps 30 --no-usb-camera --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --plushie-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0 --robot g1-ssh --enable-real-robot --g1-motion safe-actions --execute-real-action --with-wander --wander-ssh-target unitree@10.42.0.76 --wander-remote-dir /home/ubuntu/dev/g1-bottle-reaction-wander
+```
+
+Reaction直前にPID・process生存・cmdlineを確認してSIGTERMし、process終了を確認できた場合だけ
+Reactionを開始します。SIGKILLへの自動fallbackはありません。Reaction成功時だけWanderを再起動し、
+失敗・timeout・motion不確実時は停止状態を維持します。
+
 `--ssh-target`省略時は`unitree@10.42.0.76`が自動選択され、USB senderとG1 speakerが同じSSH先を使います。
 G1上の音声helperにある`eth0`はG1内部のUnitree DDS用であり、UbuntuからG1へのSSH宛先ではありません。
 

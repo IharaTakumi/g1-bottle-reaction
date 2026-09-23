@@ -80,6 +80,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="SSH host/alias; default unitree@<usb-host> (or g1 with loopback defaults)",
     )
     parser.add_argument("--ssh-control", help="optional existing SSH control socket")
+    parser.add_argument(
+        "--with-wander", action="store_true",
+        help="opt in to remote Mapless Wander with stop-before-reaction interlock",
+    )
+    parser.add_argument("--wander-ssh-target", help="SSH target for the G1 PC2 Wander process")
+    parser.add_argument(
+        "--wander-remote-dir",
+        default="/home/ubuntu/dev/g1-bottle-reaction-wander",
+        help="existing Mapless Wander repository path on PC2",
+    )
     parser.add_argument("--gst-python", default="/usr/bin/python3", help="existing system Python with GI/GStreamer")
     parser.add_argument("--duration", type=float, help="dual/usb-lan run duration in seconds")
     parser.add_argument("--yolo", action="store_true", help="object YOLO on G1 in dual viewer; never USB")

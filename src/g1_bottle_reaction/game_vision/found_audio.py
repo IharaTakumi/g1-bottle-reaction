@@ -59,6 +59,7 @@ class FoundWavSpeechBackend(SpeechBackend):
     def __init__(self, output) -> None:
         self.output = output
         self.error = ""
+        self.last_attempt_successful: bool | None = None
 
     def speak(self, text: str, *, voice_profile: str = "neutral") -> None:
         del voice_profile
@@ -67,8 +68,10 @@ class FoundWavSpeechBackend(SpeechBackend):
             f"Audio triggered: {path}; monotonic={time.monotonic():.6f}",
             flush=True,
         )
+        self.last_attempt_successful = False
         try:
             self.output.play_wav(path)
+            self.last_attempt_successful = True
         except Exception as exc:
             self.error = str(exc)
             print(
@@ -134,8 +137,10 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
     def __init__(self, delegate: RobotAdapter) -> None:
         self.delegate = delegate
         self.error = ""
+        self.last_attempt_successful: bool | None = None
 
     def play_motion(self, motion: str) -> None:
+        self.last_attempt_successful = False
         if self.error:
             print(
                 f"Motion reaction skipped: {motion} (disabled after previous error)",
@@ -153,6 +158,7 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
                 raise RuntimeError(
                     "Unitree safe Action returned RPC timeout 3104"
                 )
+            self.last_attempt_successful = True
         except MotionDecodeSafeReturnMiss as exc:
             print(
                 "MOTION REACTION SAFE RETURN MISS: "
@@ -189,6 +195,8 @@ class FoundReactionController:
         cooldown_seconds: float,
         motion_overrides: dict[str, str] | None = None,
         speech_delay_overrides: dict[str, float] | None = None,
+        wander=None,
+        reaction_completion_timeout: float = 430.0,
     ) -> None:
         if base_reaction.motion != "notice":
             raise ValueError("Dual-camera G1 reaction is restricted to existing 'notice'")
@@ -197,6 +205,8 @@ class FoundReactionController:
         unknown = (set(motion_overrides) | set(speech_delay_overrides)) - set(settings)
         if unknown:
             raise ValueError(f"Unknown found reaction overrides: {sorted(unknown)}")
+        if reaction_completion_timeout <= 0:
+            raise ValueError("reaction completion timeout must be positive")
         items = {
             FOUND_REACTION_EVENTS[name].value: replace(
                 base_reaction,
@@ -219,11 +229,18 @@ class FoundReactionController:
             self.speech,
         )
         self._jobs: list[ReactionJob] = []
+        self.wander = wander
+        self.reaction_completion_timeout = reaction_completion_timeout
+        self._closing = threading.Event()
+        self._wander_lock = threading.Lock()
+        self._completion_thread: threading.Thread | None = None
 
     @property
     def busy(self) -> bool:
         self._jobs = [job for job in self._jobs if not job.wait(0)]
-        return bool(self._jobs)
+        return bool(self._jobs) or bool(
+            self._completion_thread and self._completion_thread.is_alive()
+        )
 
     @property
     def audio_error(self) -> str:
@@ -241,6 +258,16 @@ class FoundReactionController:
         if self.busy:
             print(f"{name.upper()} REACTION DROP: reaction already running", flush=True)
             return False
+        if self.wander is not None:
+            try:
+                with self._wander_lock:
+                    self.wander.stop_and_wait()
+            except Exception as exc:
+                print(
+                    f"{name.upper()} REACTION INHIBITED: Wander stop not confirmed: {exc}",
+                    flush=True,
+                )
+                return False
         decision = self.engine.handle(
             FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
         )
@@ -251,13 +278,66 @@ class FoundReactionController:
                 f"motion={decision.reaction.motion}; confirmed_monotonic={now:.6f}",
                 flush=True,
             )
+            if self.wander is not None:
+                self._completion_thread = threading.Thread(
+                    target=self._resume_after_completion,
+                    args=(name, decision.job),
+                    name="wander-reaction-completion",
+                    daemon=True,
+                )
+                self._completion_thread.start()
+        elif self.wander is not None:
+            try:
+                with self._wander_lock:
+                    self.wander.start()
+            except Exception as exc:
+                print(f"WANDER RESUME FAILED after rejected reaction: {exc}", flush=True)
         return decision.accepted
 
-    def close(self) -> None:
+    def _resume_after_completion(self, name: str, job: ReactionJob) -> None:
+        if not job.wait(self.reaction_completion_timeout):
+            print(
+                f"{name.upper()} REACTION TIMEOUT: Wander remains stopped",
+                flush=True,
+            )
+            return
+        successful = (
+            job.successful
+            and self.robot.last_attempt_successful is True
+            and self.speech.last_attempt_successful is True
+        )
+        if not successful:
+            print(
+                f"{name.upper()} REACTION FAILED/UNCERTAIN: Wander remains stopped",
+                flush=True,
+            )
+            return
+        if self._closing.is_set():
+            return
         try:
-            self.engine.close(wait=True, cancel_pending=True)
+            with self._wander_lock:
+                if not self._closing.is_set():
+                    self.wander.start()
+                    print(
+                        f"{name.upper()} REACTION COMPLETE: Wander resumed",
+                        flush=True,
+                    )
+        except Exception as exc:
+            print(f"WANDER RESUME FAILED: {exc}; robot remains stopped", flush=True)
+
+    def close(self) -> None:
+        self._closing.set()
+        try:
+            if self.wander is not None:
+                with self._wander_lock:
+                    self.wander.close()
         finally:
-            self.speech.close()
+            try:
+                self.engine.close(wait=True, cancel_pending=True)
+            finally:
+                self.speech.close()
+        if self._completion_thread is not None:
+            self._completion_thread.join(timeout=2)
 
 
 def load_settings(args, root):
