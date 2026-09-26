@@ -185,6 +185,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self._last_motion: str | None = None
         self._last_succeeded = False
         self._last_result: dict[str, Any] | None = None
+        self._last_preflight_error = ""
         self._channel = None
         if self.resident:
             self._channel = (channel_factory() if channel_factory else
@@ -201,6 +202,28 @@ class MotionDecodeReactionAdapter(RobotAdapter):
     @property
     def last_result(self) -> dict[str, Any] | None:
         return None if self._last_result is None else dict(self._last_result)
+
+    @property
+    def last_preflight_error(self) -> str:
+        return self._last_preflight_error
+
+    def preflight_motion(self) -> bool:
+        """Check the resident worker's receive-only start gates."""
+        self._last_preflight_error = ""
+        if not self.resident or self._channel is None:
+            self._last_preflight_error = "resident preflight is unavailable"
+            return False
+        try:
+            result = self._channel.request({"operation": "preflight"})
+        except Exception as exc:
+            self._last_preflight_error = str(exc)
+            return False
+        if result.get("accepted") is True and result.get("passed") is True:
+            return True
+        self._last_preflight_error = str(
+            result.get("reason") or f"unsafe MotionDecode preflight: {result}"
+        )
+        return False
 
     @staticmethod
     def reaction_name(motion: str) -> str | None:

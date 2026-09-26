@@ -160,6 +160,7 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
                 )
             self.last_attempt_successful = True
         except MotionDecodeSafeReturnMiss as exc:
+            self.last_attempt_successful = True
             print(
                 "MOTION REACTION SAFE RETURN MISS: "
                 f"reaction={exc.reaction} returned_to_q0=false "
@@ -174,6 +175,14 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
                 "(motion disabled, no automatic retry)",
                 flush=True,
             )
+
+    def preflight_motion(self) -> bool:
+        check = getattr(self.delegate, "preflight_motion", None)
+        return True if check is None else bool(check())
+
+    @property
+    def last_preflight_error(self) -> str:
+        return str(getattr(self.delegate, "last_preflight_error", ""))
 
     def request_shutdown(self) -> None:
         self.delegate.request_shutdown()
@@ -197,6 +206,9 @@ class FoundReactionController:
         speech_delay_overrides: dict[str, float] | None = None,
         wander=None,
         reaction_completion_timeout: float = 430.0,
+        reaction_settle_seconds: float = 0.0,
+        reaction_preflight_timeout: float = 0.0,
+        sleeper=time.sleep,
     ) -> None:
         if base_reaction.motion != "notice":
             raise ValueError("Dual-camera G1 reaction is restricted to existing 'notice'")
@@ -207,6 +219,10 @@ class FoundReactionController:
             raise ValueError(f"Unknown found reaction overrides: {sorted(unknown)}")
         if reaction_completion_timeout <= 0:
             raise ValueError("reaction completion timeout must be positive")
+        if not math.isfinite(reaction_settle_seconds) or reaction_settle_seconds < 0:
+            raise ValueError("reaction settle time must be finite and non-negative")
+        if not math.isfinite(reaction_preflight_timeout) or reaction_preflight_timeout < 0:
+            raise ValueError("reaction preflight timeout must be finite and non-negative")
         items = {
             FOUND_REACTION_EVENTS[name].value: replace(
                 base_reaction,
@@ -231,6 +247,10 @@ class FoundReactionController:
         self._jobs: list[ReactionJob] = []
         self.wander = wander
         self.reaction_completion_timeout = reaction_completion_timeout
+        self.reaction_settle_seconds = float(reaction_settle_seconds)
+        self.reaction_preflight_timeout = float(reaction_preflight_timeout)
+        self.settings = dict(settings)
+        self._sleep = sleeper
         self._closing = threading.Event()
         self._wander_lock = threading.Lock()
         self._completion_thread: threading.Thread | None = None
@@ -268,6 +288,30 @@ class FoundReactionController:
                     flush=True,
                 )
                 return False
+            if self.reaction_settle_seconds:
+                self._sleep(self.reaction_settle_seconds)
+            passed = self.robot.preflight_motion()
+            deadline = time.monotonic() + self.reaction_preflight_timeout
+            while not passed and time.monotonic() < deadline:
+                self._sleep(min(.25, max(0., deadline - time.monotonic())))
+                passed = self.robot.preflight_motion()
+            if not passed:
+                reason = self.robot.last_preflight_error or "safety preflight failed"
+                print(
+                    f"{name.upper()} MOTION SKIPPED: {reason}; audio only, no retry",
+                    flush=True,
+                )
+                self.speech.speak(str(self.settings[name].sounds[0]))
+                try:
+                    with self._wander_lock:
+                        self.wander.start()
+                    print(
+                        f"{name.upper()} AUDIO-ONLY COMPLETE: Wander resumed",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(f"WANDER RESUME FAILED: {exc}; robot remains stopped", flush=True)
+                return True
         decision = self.engine.handle(
             FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
         )

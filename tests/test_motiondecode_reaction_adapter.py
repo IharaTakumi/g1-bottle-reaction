@@ -193,6 +193,31 @@ def test_resident_adapter_connects_at_start_and_reuses_channel(tmp_path: Path) -
     adapter.close(); assert channel.closed
 
 
+def test_resident_preflight_is_status_only_and_reports_failure(tmp_path: Path) -> None:
+    class PreflightChannel(FakeResidentChannel):
+        def __init__(self):
+            super().__init__(); self.safe = True
+
+        def request(self, payload):
+            if payload["operation"] == "preflight":
+                self.requests.append(payload)
+                if self.safe:
+                    return {"accepted": True, "state": "READY", "passed": True}
+                return {"accepted": True, "state": "READY", "passed": False,
+                        "reason": "robot not stable"}
+            return super().request(payload)
+
+    channel = PreflightChannel()
+    adapter = MotionDecodeReactionAdapter(tmp_path, channel_factory=lambda: channel)
+    assert adapter.preflight_motion() is True
+    channel.safe = False
+    assert adapter.preflight_motion() is False
+    assert adapter.last_preflight_error == "robot not stable"
+    assert [request["operation"] for request in channel.requests] == [
+        "status", "preflight", "preflight",
+    ]
+
+
 def test_resident_worker_unavailable_fails_without_cli_fallback(tmp_path: Path) -> None:
     class NotReady(FakeResidentChannel):
         def request(self, payload):

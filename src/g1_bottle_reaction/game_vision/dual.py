@@ -451,7 +451,7 @@ def run(args):
                 motion_overrides = {
                     "person": "motiondecode:found",
                     "banana": "motiondecode:surprise",
-                    "plushie": "motiondecode:joy",
+                    "plushie": "motiondecode:surprise",
                 }
                 speech_delay_overrides = {
                     "person": 0.0,
@@ -474,6 +474,8 @@ def run(args):
                 motion_overrides=motion_overrides,
                 speech_delay_overrides=speech_delay_overrides,
                 wander=wander,
+                reaction_settle_seconds=1.5 if wander is not None else 0.,
+                reaction_preflight_timeout=5.0 if wander is not None else 0.,
                 reaction_completion_timeout=args.motiondecode_timeout + 5.0,
             )
             print(f"FOUND REACTION: robot={args.robot}, output={found_settings.output}, "

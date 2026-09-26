@@ -97,7 +97,7 @@ def controller(robot: RobotAdapter, output: RecordingOutput) -> FoundReactionCon
         motion_overrides={
             "person": "motiondecode:found",
             "banana": "motiondecode:surprise",
-            "plushie": "motiondecode:joy",
+            "plushie": "motiondecode:surprise",
         },
         speech_delay_overrides={"person": 0.0, "banana": 0.0, "plushie": 0.0},
     )
@@ -357,7 +357,7 @@ def test_three_target_motion_mapping_and_zero_speech_delay() -> None:
         assert robot.motions == [
             "motiondecode:found",
             "motiondecode:surprise",
-            "motiondecode:joy",
+            "motiondecode:surprise",
         ]
         assert output.played == [
             Path("person.wav"),
@@ -374,6 +374,62 @@ def test_three_target_motion_mapping_and_zero_speech_delay() -> None:
         subject.close()
 
 
+def test_four_rearmed_object_triggers_map_to_four_motion_calls() -> None:
+    robot = RecordingRobot()
+    output = RecordingOutput()
+    subject = controller(robot, output)
+    person_gate = FoundGate()
+    banana_gate = FoundGate(object_attribute="bananas")
+    plushie_gate = FoundGate(object_attribute="plushies")
+
+    def observation(stamp: float, target: str | None) -> Detection:
+        return Detection(
+            people=(Person((1, 2, 10, 20), .9),) if target == "person" else (),
+            bananas=(Banana((2, 3, 12, 22), .9),) if target == "banana" else (),
+            plushies=(Plushie((3, 4, 13, 23), .9),) if target == "plushie" else (),
+            stamp=stamp,
+            status="RUNNING",
+        )
+
+    try:
+        for base, target in (
+            (1.0, "person"),
+            (6.0, "banana"),
+            (11.0, "plushie"),
+            (16.0, "person"),
+        ):
+            selected = []
+            for offset in (0, .1, .2, .3, .4):
+                stamp = base + offset
+                trigger = select_audio_trigger(
+                    observation(stamp, target), stamp,
+                    person_gate, banana_gate, plushie_gate,
+                    reaction_target=target,
+                )
+                if trigger:
+                    selected.append(trigger)
+                    assert subject.trigger(trigger, stamp)
+            assert selected == [target]
+            wait_idle(subject)
+            for offset in np.arange(2.5, 4.1, .1):
+                stamp = base + offset
+                assert select_audio_trigger(
+                    observation(stamp, None), stamp,
+                    person_gate, banana_gate, plushie_gate,
+                    reaction_target=target,
+                ) is None
+
+        assert robot.motions == [
+            "motiondecode:found",
+            "motiondecode:surprise",
+            "motiondecode:surprise",
+            "motiondecode:found",
+        ]
+        assert len(output.played) == 4
+    finally:
+        subject.close()
+
+
 def test_motion_and_audio_start_in_parallel_and_busy_events_drop() -> None:
     robot = BlockingRobot()
     output = RecordingOutput()
@@ -384,7 +440,7 @@ def test_motion_and_audio_start_in_parallel_and_busy_events_drop() -> None:
         assert output.started.wait(timeout=1)
         assert subject.busy
         assert not subject.trigger("plushie", 2.0)
-        assert robot.motions == ["motiondecode:joy"]
+        assert robot.motions == ["motiondecode:surprise"]
         assert output.played == [Path("plushie_affectionate.wav")]
         robot.release.set()
         wait_idle(subject)

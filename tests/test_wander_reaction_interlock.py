@@ -5,7 +5,10 @@ import subprocess
 import threading
 import time
 
+import pytest
+
 from g1_bottle_reaction.adapters.robot import RobotAdapter
+from g1_bottle_reaction.adapters.motiondecode_reaction import MotionDecodeSafeReturnMiss
 from g1_bottle_reaction.game_vision.found_audio import (
     FoundReactionController,
     FoundSettings,
@@ -35,8 +38,11 @@ class FakeWander:
 
 
 class RecordingOutput:
+    def __init__(self):
+        self.played = []
+
     def play_wav(self, _path):
-        pass
+        self.played.append(_path)
 
     def close(self):
         pass
@@ -64,6 +70,41 @@ class BlockingRobot(RobotAdapter):
         self.events.append("REACTION START")
         assert self.release.wait(timeout=2)
         self.events.append("REACTION COMPLETE")
+
+
+class PreflightRobot(OrderedRobot):
+    def __init__(self, events, *, safe):
+        super().__init__(events)
+        self.safe = safe
+        self.last_preflight_error = "robot not stable" if not safe else ""
+
+    def preflight_motion(self):
+        self.events.append("REACTION PREFLIGHT")
+        return self.safe
+
+
+class SafeReturnMissRobot(OrderedRobot):
+    def play_motion(self, _motion):
+        self.events.append("REACTION START")
+        self.events.append("SAFE RETURN MISS")
+        raise MotionDecodeSafeReturnMiss(
+            "found",
+            {"returned_to_q0": False, "controlled_q0_return_error_rad": .0328},
+            {"state": "READY", "weight": 0.0, "ownership_safe": True},
+        )
+
+
+class SequenceRobot(RobotAdapter):
+    def __init__(self, events):
+        self.events = events
+
+    def preflight_motion(self):
+        self.events.append("STABLE")
+        return True
+
+    def play_motion(self, motion):
+        self.events.append(motion.removeprefix("motiondecode:").upper())
+        self.events.append("REACTION_DONE")
 
 
 def make_controller(events, *, fail=False, timeout=1.0):
@@ -113,6 +154,116 @@ def test_wander_stops_before_reaction_and_resumes_only_after_completion():
             "WANDER START",
         ]
         assert wander.running
+    finally:
+        controller.close()
+
+
+def test_settle_and_preflight_happen_after_stop_before_reaction():
+    events = []
+    configured = FoundSettings(.25, .3, .15, 2, (Path("detected.wav"),), "mock", 1)
+    wander = FakeWander(events)
+    robot = PreflightRobot(events, safe=True)
+    controller = FoundReactionController(
+        {"person": configured}, RecordingOutput(), robot,
+        base_reaction=Reaction("FOUND", "notice", "unused", 0),
+        cooldown_seconds=0, wander=wander, reaction_settle_seconds=.75,
+        sleeper=lambda seconds: events.append(("SETTLE", seconds)),
+    )
+    wander.start()
+    try:
+        assert controller.trigger("person", 1)
+        wait_not_busy(controller)
+        assert events[:5] == [
+            "WANDER START", "WANDER STOP", ("SETTLE", .75),
+            "REACTION PREFLIGHT", "REACTION START",
+        ]
+        assert events[-1] == "WANDER START"
+    finally:
+        controller.close()
+
+
+def test_failed_preflight_plays_audio_only_and_resumes_without_retry():
+    events = []
+    configured = FoundSettings(.25, .3, .15, 2, (Path("detected.wav"),), "mock", 1)
+    wander = FakeWander(events)
+    robot = PreflightRobot(events, safe=False)
+    output = RecordingOutput()
+    controller = FoundReactionController(
+        {"person": configured}, output, robot,
+        base_reaction=Reaction("FOUND", "notice", "unused", 0),
+        cooldown_seconds=0, wander=wander,
+    )
+    wander.start()
+    try:
+        assert controller.trigger("person", 1)
+        assert events == [
+            "WANDER START", "WANDER STOP", "REACTION PREFLIGHT", "WANDER START",
+        ]
+        assert output.played == [Path("detected.wav")]
+        assert "REACTION START" not in events
+        assert wander.running
+    finally:
+        controller.close()
+
+
+def test_safe_return_miss_with_safe_postflight_resumes_wander():
+    events = []
+    configured = FoundSettings(.25, .3, .15, 2, (Path("detected.wav"),), "mock", 1)
+    wander = FakeWander(events)
+    controller = FoundReactionController(
+        {"person": configured}, RecordingOutput(), SafeReturnMissRobot(events),
+        base_reaction=Reaction("FOUND", "notice", "unused", 0),
+        cooldown_seconds=0, wander=wander,
+    )
+    wander.start()
+    try:
+        assert controller.trigger("person", 1)
+        wait_not_busy(controller)
+        assert events == [
+            "WANDER START", "WANDER STOP", "REACTION START",
+            "SAFE RETURN MISS", "WANDER START",
+        ]
+        assert controller.motion_error == ""
+        assert wander.running
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize(
+    ("target", "motion"),
+    (("person", "FOUND"), ("banana", "SURPRISE"), ("plushie", "SURPRISE")),
+)
+def test_silent_mock_full_cycle_for_every_detection_target(target, motion):
+    events = []
+    configured = FoundSettings(.25, .3, .15, 2, (Path("suppressed.wav"),), "mock", 1)
+    wander = FakeWander(events)
+    silent_output = RecordingOutput()
+    controller = FoundReactionController(
+        {name: configured for name in ("person", "banana", "plushie")},
+        silent_output,
+        SequenceRobot(events),
+        base_reaction=Reaction("FOUND", "notice", "unused", 0),
+        cooldown_seconds=0,
+        motion_overrides={
+            "person": "motiondecode:found",
+            "banana": "motiondecode:surprise",
+            "plushie": "motiondecode:surprise",
+        },
+        speech_delay_overrides={"person": 0, "banana": 0, "plushie": 0},
+        wander=wander,
+    )
+    wander.start()
+    events.append("DETECT")
+    try:
+        assert controller.trigger(target, 1)
+        wait_not_busy(controller)
+        assert events == [
+            "WANDER START", "DETECT", "WANDER STOP", "STABLE",
+            motion, "REACTION_DONE", "WANDER START",
+        ]
+        # The mock consumes the speech request without opening an audio device.
+        assert silent_output.played == [Path("suppressed.wav")]
+        print(f"{target}: " + " -> ".join(events))
     finally:
         controller.close()
 
