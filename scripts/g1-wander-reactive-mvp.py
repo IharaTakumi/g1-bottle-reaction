@@ -41,8 +41,8 @@ def body_writer_conflicts():
         ["ps", "-eo", "pid=,comm=,args="], check=True, capture_output=True,
         text=True, timeout=5)
     markers = (
-        "resident_worker.py", "motiondecode", "g1-wander-loco-once.py",
-        "g1-wander-forward-distance.py", "g1-wander-reactive-mvp.py",
+        "g1-wander-loco-once.py", "g1-wander-forward-distance.py",
+        "g1-wander-reactive-mvp.py",
     )
     conflicts = []
     for line in result.stdout.splitlines():
