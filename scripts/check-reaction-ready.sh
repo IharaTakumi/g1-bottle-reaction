@@ -52,7 +52,7 @@ print('VALIDATED_MUJOCO_PASS')
 PY
 REMOTE
 
-"${ssh_base[@]}" "cd '$code' && mkdir -p output/live && PYTHONPATH='$deps:$code/scripts:/home/unitree/unitree_sdk2_python' '$python' -B scripts/inspect_arm_sdk_publishers.py --network-interface eth0 --seconds 15 --json output/live/motiondecode-arm-ready.json >/dev/null && cat output/live/motiondecode-arm-ready.json" >"$report"
+"${ssh_base[@]}" "cd '$code' && mkdir -p output/live && rm -f output/live/motiondecode-arm-ready.json && (PYTHONPATH='$deps:$code/scripts:/home/unitree/unitree_sdk2_python' '$python' -B scripts/inspect_arm_sdk_publishers.py --network-interface eth0 --seconds 15 --json output/live/motiondecode-arm-ready.json >/dev/null 2>&1 || test -s output/live/motiondecode-arm-ready.json) && cat output/live/motiondecode-arm-ready.json" >"$report"
 arm_pid=$("$script_root/scripts/reaction-runtime-validate.py" arm "$report" --source-ip "$source_ip")
 echo "ARM_IDENTITY_PASS pid=$arm_pid"
 "${ssh_base[@]}" "test -S '$socket' && cd '$code' && '$python' -B scripts/resident_worker_client.py --socket '$socket' --timeout 3" >"$status_file"
