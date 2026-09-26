@@ -209,6 +209,20 @@ def validate_args(args):
             raise ValueError("--with-wander requires --found-audio")
         if not args.wander_ssh_target:
             raise ValueError("--with-wander requires --wander-ssh-target")
+    if args.patrol_control_socket:
+        if args.with_wander:
+            raise ValueError("--patrol-control-socket cannot be combined with --with-wander")
+        if not args.found_audio:
+            raise ValueError("--patrol-control-socket requires --found-audio")
+        if args.robot != "motiondecode" or not args.enable_real_robot:
+            raise ValueError(
+                "Patrol interlock requires enabled real MotionDecode reactions"
+            )
+        if not Path(args.patrol_control_socket).is_absolute():
+            raise ValueError("--patrol-control-socket must be absolute")
+        if (not math.isfinite(args.patrol_pause_timeout)
+                or args.patrol_pause_timeout <= 0):
+            raise ValueError("--patrol-pause-timeout must be finite and positive")
     if args.robot in {"g1", "g1-ssh"}:
         if not args.found_audio:
             raise ValueError("real robot adapters require --found-audio")
@@ -341,7 +355,7 @@ def run(args):
         raise RuntimeError("A desktop session is required; otherwise use --headless")
     readers = {}
     yolo = None
-    wander = None
+    wander = patrol = None
     reaction = gate = banana_gate = plushie_gate = None
     found_label = None
     boxes = True
@@ -371,6 +385,13 @@ def run(args):
                 args.wander_ssh_target,
                 args.wander_remote_dir,
                 ssh_control=wander_control,
+            )
+        if args.patrol_control_socket:
+            from .patrol_interlock import LocalPatrolController
+
+            patrol = LocalPatrolController(
+                args.patrol_control_socket,
+                pause_timeout=args.patrol_pause_timeout,
             )
         if found_settings:
             from .found_audio import (
@@ -474,8 +495,13 @@ def run(args):
                 motion_overrides=motion_overrides,
                 speech_delay_overrides=speech_delay_overrides,
                 wander=wander,
-                reaction_settle_seconds=1.5 if wander is not None else 0.,
-                reaction_preflight_timeout=5.0 if wander is not None else 0.,
+                patrol=patrol,
+                reaction_settle_seconds=(
+                    1.5 if wander is not None else 0.
+                ),
+                reaction_preflight_timeout=(
+                    10.0 if patrol is not None else (5.0 if wander is not None else 0.)
+                ),
                 reaction_completion_timeout=args.motiondecode_timeout + 5.0,
             )
             print(f"FOUND REACTION: robot={args.robot}, output={found_settings.output}, "

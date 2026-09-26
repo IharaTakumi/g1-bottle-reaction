@@ -20,6 +20,7 @@ if str(HERE) not in sys.path:
 from lidar_guard import GuardState, LidarGuard
 from locomotion_adapter import DryRunLocomotionAdapter, UdpLocomotionAdapter
 from patrol_controller import PatrolConfig, PatrolController
+from control_ipc import PatrolControlServer
 from udp_relay_guard import UdpRelayGuard
 
 CLOUD_TOPIC = "rt/utlidar/cloud_livox_mid360"
@@ -52,6 +53,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--turn-only", action="store_true")
     value.add_argument("--operator-approved-one-cycle", action="store_true")
     value.add_argument("--operator-approved-turn-only", action="store_true")
+    value.add_argument("--control-socket")
+    value.add_argument("--start-paused", action="store_true")
     return value
 
 
@@ -154,7 +157,7 @@ class DDSLidarSource:
 def writer_conflicts() -> list[str]:
     output = subprocess.run(["ps", "-eo", "pid=,comm=,args="], check=True,
                             capture_output=True, text=True, timeout=5).stdout
-    markers = ("resident_worker.py", "motiondecode", "walk_forward_real", "run_patrol.py")
+    markers = ("walk_forward_real", "run_patrol.py")
     own = os.getpid()
     found = []
     for line in output.splitlines():
@@ -223,6 +226,8 @@ def main(argv=None) -> int:
     config(args)
     if args.mode == "dry-run":
         return dry_run(args)
+    if args.start_paused and not args.control_socket:
+        raise ValueError("--start-paused requires --control-socket")
     guard, source, report = observe_lidar(args)
     if args.mode == "lidar-check":
         source.close()
@@ -241,13 +246,22 @@ def main(argv=None) -> int:
         source.close()
         raise RuntimeError("writer ownership conflict: " + "; ".join(conflicts))
     loco = UdpLocomotionAdapter(args.locomotion_relay_host, args.locomotion_relay_port)
+    control = None
     try:
         controller = PatrolController(loco, guard, config(args))
+        if args.start_paused:
+            controller.pause()
+        if args.control_socket:
+            control = PatrolControlServer(args.control_socket, controller)
+            control.start()
+            print(f"[patrol] CONTROL READY socket={args.control_socket}", flush=True)
         if args.turn_only:
             controller.run_turn_only()
         else:
             controller.run(cycles=args.loops)
     finally:
+        if control is not None:
+            control.close()
         loco.close()
         source.close()
     return 0

@@ -14,19 +14,22 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 REACTION = ROOT / "tools/g1_dual_camera.py"
 PATROL = ROOT / "patrol/run_patrol.py"
 MODEL = ROOT / ".runtime/models/yolo11n.pt"
 PYTHON = Path("/home/ubuntu/.venvs/g1-game-vision/bin/python")
 MOTIONDECODE = Path("/home/ubuntu/dev/motiondecode-test")
 DRY_RUN_SOCKET = Path("/tmp/g1-integrated-motiondecode-dry.sock")
+PATROL_CONTROL_SOCKET = Path("/tmp/g1-patrol-control.sock")
 
 
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(
         description=(
             "Thin supervisor for the existing camera/YOLO/Reaction and Patrol "
-            "processes. Reaction never controls Patrol."
+            "processes with a local stop-react-resume interlock."
         )
     )
     mode = value.add_mutually_exclusive_group(required=True)
@@ -38,7 +41,7 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--real-patrol",
         action="store_true",
-        help="run the existing armed three-loop Patrol in parallel",
+        help="run the existing armed one-loop Patrol with Reaction interlock",
     )
     value.add_argument(
         "--operator-approved-real-patrol",
@@ -53,6 +56,7 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument("--ssh-target", default="unitree@10.42.0.76")
     value.add_argument("--ssh-control")
+    value.add_argument("--yolo-model", type=Path, default=MODEL)
     value.add_argument(
         "--dry-run",
         action="store_true",
@@ -73,13 +77,13 @@ def reaction_command(args: argparse.Namespace) -> list[str]:
         "--g1-camera-fps", "30",
         "--no-usb-camera",
         "--yolo",
-        "--yolo-model", str(MODEL),
+        "--yolo-model", str(args.yolo_model),
         "--yolo-confidence", "0.25",
         "--banana-confidence", "0.25",
         "--plushie-confidence", "0.25",
         "--reaction-target", "all",
         "--found-audio",
-        "--found-output", "mock",
+        "--found-output", "mock" if args.no_locomotion else "g1",
         "--found-duration", "0.3",
         "--audio-cooldown", "2.0",
         "--duration", str(args.duration),
@@ -98,7 +102,8 @@ def reaction_command(args: argparse.Namespace) -> list[str]:
             "--motiondecode-socket", "/tmp/motiondecode-reaction.sock",
             "--enable-real-robot",
             "--confirm-site-ready",
-            "--allow-hackathon-joy",
+            "--patrol-control-socket", str(PATROL_CONTROL_SOCKET),
+            "--patrol-pause-timeout", "30",
         ]
     if args.ssh_control:
         command += ["--ssh-control", args.ssh_control]
@@ -118,8 +123,9 @@ def patrol_command() -> list[str]:
         "--forward-distance", "2.0", "--return-distance", "4.0",
         "--home-distance", "2.0", "--forward-speed", "0.30",
         "--turn-yaw-rate", "0.50", "--max-lateral-drift", "0.80",
-        "--heading-hold", "--loops", "3", "--arm", "--one-cycle",
+        "--heading-hold", "--loops", "1", "--arm", "--one-cycle",
         "--operator-approved-one-cycle",
+        "--control-socket", str(PATROL_CONTROL_SOCKET), "--start-paused",
     ]
 
 
@@ -132,11 +138,11 @@ def check_entrypoint(path: Path) -> None:
                    check=True, stdout=subprocess.DEVNULL)
 
 
-def preflight() -> None:
+def preflight(args: argparse.Namespace) -> None:
     check_entrypoint(REACTION)
     check_entrypoint(PATROL)
-    if not MODEL.is_file() or MODEL.stat().st_size == 0:
-        raise RuntimeError(f"missing YOLO model: {MODEL}")
+    if not args.yolo_model.is_file() or args.yolo_model.stat().st_size == 0:
+        raise RuntimeError(f"missing YOLO model: {args.yolo_model}")
     worker = MOTIONDECODE / "scripts/resident_worker.py"
     if not worker.is_file():
         raise RuntimeError(f"missing MotionDecode resident worker: {worker}")
@@ -175,6 +181,33 @@ def resident_request(request: dict[str, object]) -> dict[str, object]:
     if not isinstance(response, dict):
         raise RuntimeError("invalid dry-run resident response")
     return response
+
+
+def patrol_request(request_body: dict[str, object]) -> dict[str, object]:
+    from patrol.control_ipc import request
+
+    response = request(PATROL_CONTROL_SOCKET, request_body, timeout=5.0)
+    if response.get("ok") is not True:
+        raise RuntimeError(str(response.get("error") or "Patrol control failed"))
+    return response
+
+
+def wait_for_patrol_paused(process: subprocess.Popen[bytes]) -> None:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("Patrol exited before control socket became ready")
+        if PATROL_CONTROL_SOCKET.exists():
+            try:
+                status = patrol_request({"operation": "status"})
+            except (OSError, RuntimeError):
+                pass
+            else:
+                if status.get("paused") and not status.get("error"):
+                    print("PATROL_INTERLOCK=PAUSED_READY", flush=True)
+                    return
+        time.sleep(0.1)
+    raise RuntimeError("Patrol did not reach initial PAUSED state")
 
 
 def start_dry_run_resident() -> subprocess.Popen[bytes]:
@@ -238,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_locomotion and args.operator_approved_real_patrol:
         raise SystemExit("real Patrol approval is invalid with --no-locomotion")
 
-    preflight()
+    preflight(args)
     reaction = reaction_command(args)
     patrol = patrol_command()
     if args.dry_run:
@@ -255,14 +288,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.no_locomotion:
             motiondecode_process = start_dry_run_resident()
-        reaction_process = subprocess.Popen(reaction, cwd=ROOT, start_new_session=True)
-        print(f"REACTION_PID={reaction_process.pid}", flush=True)
         if args.no_locomotion:
+            reaction_process = subprocess.Popen(reaction, cwd=ROOT, start_new_session=True)
+            print(f"REACTION_PID={reaction_process.pid}", flush=True)
             run_patrol_dry_run()
             print("LOCOMOTION=NOT ARMED", flush=True)
             return reaction_process.wait()
         patrol_process = subprocess.Popen(patrol, cwd=ROOT, start_new_session=True)
         print(f"PATROL_PID={patrol_process.pid}", flush=True)
+        wait_for_patrol_paused(patrol_process)
+        reaction_process = subprocess.Popen(reaction, cwd=ROOT, start_new_session=True)
+        print(f"REACTION_PID={reaction_process.pid}", flush=True)
+        time.sleep(2.0)
+        if reaction_process.poll() is not None:
+            raise RuntimeError("Reaction exited before Patrol release")
+        status = patrol_request({"operation": "resume"})
+        if status.get("paused") or status.get("stopped") or status.get("error"):
+            raise RuntimeError(str(status.get("error") or "Patrol resume failed"))
+        print("PATROL_INTERLOCK=RUNNING", flush=True)
         while True:
             reaction_status = reaction_process.poll()
             patrol_status = patrol_process.poll()

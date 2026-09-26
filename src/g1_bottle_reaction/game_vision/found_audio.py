@@ -60,14 +60,22 @@ class FoundWavSpeechBackend(SpeechBackend):
         self.output = output
         self.error = ""
         self.last_attempt_successful: bool | None = None
+        self._start_callback = None
+        self._callback_lock = threading.Lock()
+
+    def set_start_callback(self, callback) -> None:
+        with self._callback_lock:
+            self._start_callback = callback
 
     def speak(self, text: str, *, voice_profile: str = "neutral") -> None:
         del voice_profile
         path = Path(text)
-        print(
-            f"Audio triggered: {path}; monotonic={time.monotonic():.6f}",
-            flush=True,
-        )
+        started = time.monotonic()
+        with self._callback_lock:
+            callback, self._start_callback = self._start_callback, None
+        if callback is not None:
+            callback(started)
+        print(f"Audio triggered: {path}; monotonic={started:.6f}", flush=True)
         self.last_attempt_successful = False
         try:
             self.output.play_wav(path)
@@ -138,21 +146,45 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
         self.delegate = delegate
         self.error = ""
         self.last_attempt_successful: bool | None = None
+        self.safe_return_miss = False
+        self._before_motion = None
+        self._motion_start_callback = None
+        self._gate_lock = threading.Lock()
+
+    def set_motion_gate(self, before_motion, on_motion_start) -> None:
+        with self._gate_lock:
+            self._before_motion = before_motion
+            self._motion_start_callback = on_motion_start
+
+    def clear_motion_gate(self) -> None:
+        with self._gate_lock:
+            self._before_motion = None
+            self._motion_start_callback = None
 
     def play_motion(self, motion: str) -> None:
         self.last_attempt_successful = False
+        self.safe_return_miss = False
         if self.error:
             print(
                 f"Motion reaction skipped: {motion} (disabled after previous error)",
                 flush=True,
             )
             return
-        print(
-            f"Motion reaction triggered: {motion}; "
-            f"monotonic={time.monotonic():.6f}",
-            flush=True,
-        )
         try:
+            with self._gate_lock:
+                before_motion = self._before_motion
+                on_motion_start = self._motion_start_callback
+                self._before_motion = None
+                self._motion_start_callback = None
+            if before_motion is not None:
+                before_motion()
+            started = time.monotonic()
+            if on_motion_start is not None:
+                on_motion_start(started)
+            print(
+                f"Motion reaction triggered: {motion}; monotonic={started:.6f}",
+                flush=True,
+            )
             self.delegate.play_motion(motion)
             if getattr(self.delegate, "last_motion_timed_out", False):
                 raise RuntimeError(
@@ -161,6 +193,7 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
             self.last_attempt_successful = True
         except MotionDecodeSafeReturnMiss as exc:
             self.last_attempt_successful = True
+            self.safe_return_miss = True
             print(
                 "MOTION REACTION SAFE RETURN MISS: "
                 f"reaction={exc.reaction} returned_to_q0=false "
@@ -205,6 +238,7 @@ class FoundReactionController:
         motion_overrides: dict[str, str] | None = None,
         speech_delay_overrides: dict[str, float] | None = None,
         wander=None,
+        patrol=None,
         reaction_completion_timeout: float = 430.0,
         reaction_settle_seconds: float = 0.0,
         reaction_preflight_timeout: float = 0.0,
@@ -245,7 +279,12 @@ class FoundReactionController:
             self.speech,
         )
         self._jobs: list[ReactionJob] = []
+        if wander is not None and patrol is not None:
+            raise ValueError("Wander and Patrol interlocks are mutually exclusive")
         self.wander = wander
+        self.patrol = patrol
+        self.interlock = patrol if patrol is not None else wander
+        self.interlock_label = "Patrol" if patrol is not None else "Wander"
         self.reaction_completion_timeout = reaction_completion_timeout
         self.reaction_settle_seconds = float(reaction_settle_seconds)
         self.reaction_preflight_timeout = float(reaction_preflight_timeout)
@@ -254,6 +293,8 @@ class FoundReactionController:
         self._closing = threading.Event()
         self._wander_lock = threading.Lock()
         self._completion_thread: threading.Thread | None = None
+        self._timing_lock = threading.Lock()
+        self._reaction_timing: dict[str, float | str] | None = None
 
     @property
     def busy(self) -> bool:
@@ -278,15 +319,20 @@ class FoundReactionController:
         if self.busy:
             print(f"{name.upper()} REACTION DROP: reaction already running", flush=True)
             return False
-        if self.wander is not None:
+        if self.patrol is not None:
+            return self._trigger_patrol(name, now)
+        if self.interlock is not None:
             try:
                 with self._wander_lock:
-                    self.wander.stop_and_wait()
+                    self.interlock.stop_and_wait()
             except Exception as exc:
                 print(
-                    f"{name.upper()} REACTION INHIBITED: Wander stop not confirmed: {exc}",
+                    f"{name.upper()} REACTION INHIBITED: "
+                    f"{self.interlock_label} stop not confirmed: {exc}",
                     flush=True,
                 )
+                if self.patrol is not None:
+                    self.patrol.abort(str(exc))
                 return False
             if self.reaction_settle_seconds:
                 self._sleep(self.reaction_settle_seconds)
@@ -297,6 +343,14 @@ class FoundReactionController:
                 passed = self.robot.preflight_motion()
             if not passed:
                 reason = self.robot.last_preflight_error or "safety preflight failed"
+                if self.patrol is not None:
+                    print(
+                        f"{name.upper()} REACTION SKIPPED: {reason}; "
+                        "Patrol final STOP, no retry",
+                        flush=True,
+                    )
+                    self.patrol.abort(reason)
+                    return True
                 print(
                     f"{name.upper()} MOTION SKIPPED: {reason}; audio only, no retry",
                     flush=True,
@@ -304,7 +358,7 @@ class FoundReactionController:
                 self.speech.speak(str(self.settings[name].sounds[0]))
                 try:
                     with self._wander_lock:
-                        self.wander.start()
+                        self.interlock.start()
                     print(
                         f"{name.upper()} AUDIO-ONLY COMPLETE: Wander resumed",
                         flush=True,
@@ -322,7 +376,7 @@ class FoundReactionController:
                 f"motion={decision.reaction.motion}; confirmed_monotonic={now:.6f}",
                 flush=True,
             )
-            if self.wander is not None:
+            if self.interlock is not None:
                 self._completion_thread = threading.Thread(
                     target=self._resume_after_completion,
                     args=(name, decision.job),
@@ -330,51 +384,184 @@ class FoundReactionController:
                     daemon=True,
                 )
                 self._completion_thread.start()
-        elif self.wander is not None:
+        elif self.interlock is not None:
             try:
                 with self._wander_lock:
-                    self.wander.start()
+                    self.interlock.start()
             except Exception as exc:
-                print(f"WANDER RESUME FAILED after rejected reaction: {exc}", flush=True)
+                print(
+                    f"{self.interlock_label.upper()} RESUME FAILED after rejected "
+                    f"reaction: {exc}", flush=True,
+                )
         return decision.accepted
+
+    def _trigger_patrol(self, name: str, now: float) -> bool:
+        with self._timing_lock:
+            self._reaction_timing = {"target": name, "t0": float(now)}
+        self.speech.set_start_callback(self._record_audio_start)
+        self.robot.set_motion_gate(
+            lambda: self._patrol_motion_gate(name), self._record_motion_start
+        )
+        decision = self.engine.handle(
+            FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
+        )
+        if not decision.accepted or decision.job is None:
+            self.speech.set_start_callback(None)
+            self.robot.clear_motion_gate()
+            with self._timing_lock:
+                self._reaction_timing = None
+            return False
+        self._jobs.append(decision.job)
+        print(
+            f"{name.upper()} REACTION EVENT: immediate audio + "
+            f"stop-gated motion={decision.reaction.motion}; "
+            f"confirmed_monotonic={now:.6f}",
+            flush=True,
+        )
+        self._completion_thread = threading.Thread(
+            target=self._resume_after_completion,
+            args=(name, decision.job),
+            name="patrol-reaction-completion",
+            daemon=True,
+        )
+        self._completion_thread.start()
+        return True
+
+    def _patrol_motion_gate(self, name: str) -> None:
+        try:
+            self.patrol.stop_and_wait()
+            stopped = self.patrol.last_stop_sent_monotonic or time.monotonic()
+            with self._timing_lock:
+                if self._reaction_timing is not None:
+                    self._reaction_timing["t2"] = stopped
+            self.patrol.wait_reaction_ready()
+            passed = self.robot.preflight_motion()
+            deadline = time.monotonic() + self.reaction_preflight_timeout
+            while not passed and time.monotonic() < deadline:
+                self._sleep(min(.25, max(0., deadline - time.monotonic())))
+                passed = self.robot.preflight_motion()
+            if not passed:
+                raise RuntimeError(
+                    self.robot.last_preflight_error or "safety preflight failed"
+                )
+            self.patrol.wait_reaction_ready()
+            stationary = time.monotonic()
+            with self._timing_lock:
+                if self._reaction_timing is not None:
+                    self._reaction_timing["t3"] = stationary
+            print(
+                f"{name.upper()} ARMS STATIONARY: monotonic={stationary:.6f}",
+                flush=True,
+            )
+        except Exception as exc:
+            self.patrol.abort(str(exc))
+            raise
+
+    def _record_audio_start(self, stamp: float) -> None:
+        with self._timing_lock:
+            if self._reaction_timing is not None:
+                self._reaction_timing["t1"] = stamp
+
+    def _record_motion_start(self, stamp: float) -> None:
+        with self._timing_lock:
+            if self._reaction_timing is not None:
+                self._reaction_timing["t4"] = stamp
+
+    def _report_reaction_timing(self) -> None:
+        with self._timing_lock:
+            timing = dict(self._reaction_timing or {})
+            self._reaction_timing = None
+        if not timing or "t0" not in timing:
+            return
+        t0 = float(timing["t0"])
+        t1 = timing.get("t1")
+        t2 = timing.get("t2")
+        t3 = timing.get("t3")
+        t4 = timing.get("t4")
+        result = getattr(self.robot.delegate, "last_result", None) or {}
+        adapter_trigger = result.get("reaction_engine_trigger_monotonic_s")
+        trigger_to_clip = result.get("trigger_to_clip_s")
+        t5 = (
+            float(adapter_trigger) + float(trigger_to_clip)
+            if adapter_trigger is not None and trigger_to_clip is not None else None
+        )
+        def delta(end, start=t0):
+            return None if end is None else max(0.0, float(end) - float(start))
+        payload = {
+            "target": timing.get("target"),
+            "T0_detection_confirmed": t0,
+            "T1_audio_start": t1,
+            "T2_locomotion_stop_sent": t2,
+            "T3_arms_stationary": t3,
+            "T4_motiondecode_trigger": t4,
+            "T5_visible_motion_start": t5,
+            "detection_to_audio_s": delta(t1),
+            "detection_to_stop_s": delta(t2),
+            "stop_to_stationary_s": delta(t3, t2) if t2 is not None else None,
+            "stationary_to_motiondecode_trigger_s": (
+                delta(t4, t3) if t3 is not None else None
+            ),
+            "detection_to_motiondecode_trigger_s": delta(t4),
+            "detection_to_visible_motion_s": delta(t5),
+        }
+        import json
+        print("REACTION LATENCY: " + json.dumps(payload, sort_keys=True), flush=True)
 
     def _resume_after_completion(self, name: str, job: ReactionJob) -> None:
         if not job.wait(self.reaction_completion_timeout):
             print(
-                f"{name.upper()} REACTION TIMEOUT: Wander remains stopped",
+                f"{name.upper()} REACTION TIMEOUT: {self.interlock_label} remains stopped",
                 flush=True,
             )
+            if self.patrol is not None:
+                self.patrol.abort("Reaction completion timeout")
+                self._report_reaction_timing()
             return
         successful = (
             job.successful
             and self.robot.last_attempt_successful is True
             and self.speech.last_attempt_successful is True
         )
+        if self.patrol is not None and self.robot.safe_return_miss:
+            successful = False
         if not successful:
             print(
-                f"{name.upper()} REACTION FAILED/UNCERTAIN: Wander remains stopped",
+                f"{name.upper()} REACTION FAILED/UNCERTAIN: "
+                f"{self.interlock_label} remains stopped",
                 flush=True,
             )
+            if self.patrol is not None:
+                self.patrol.abort("Reaction completion or q0 return was not confirmed")
+                self._report_reaction_timing()
             return
         if self._closing.is_set():
             return
         try:
             with self._wander_lock:
                 if not self._closing.is_set():
-                    self.wander.start()
+                    self.interlock.start()
                     print(
-                        f"{name.upper()} REACTION COMPLETE: Wander resumed",
+                        f"{name.upper()} REACTION COMPLETE: "
+                        f"{self.interlock_label} resumed",
                         flush=True,
                     )
+                    if self.patrol is not None:
+                        self._report_reaction_timing()
         except Exception as exc:
-            print(f"WANDER RESUME FAILED: {exc}; robot remains stopped", flush=True)
+            print(
+                f"{self.interlock_label.upper()} RESUME FAILED: {exc}; "
+                "robot remains stopped",
+                flush=True,
+            )
+            if self.patrol is not None:
+                self.patrol.abort(str(exc))
 
     def close(self) -> None:
         self._closing.set()
         try:
-            if self.wander is not None:
+            if self.interlock is not None:
                 with self._wander_lock:
-                    self.wander.close()
+                    self.interlock.close()
         finally:
             try:
                 self.engine.close(wait=True, cancel_pending=True)

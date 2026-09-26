@@ -84,6 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--with-wander", action="store_true",
         help="opt in to remote Mapless Wander with stop-before-reaction interlock",
     )
+    parser.add_argument(
+        "--patrol-control-socket",
+        help="absolute local Patrol pause/resume/status Unix socket",
+    )
+    parser.add_argument(
+        "--patrol-pause-timeout",
+        type=float,
+        default=30.0,
+        help="seconds to wait for Patrol to confirm PAUSED",
+    )
     parser.add_argument("--wander-ssh-target", help="SSH target for the G1 PC2 Wander process")
     parser.add_argument(
         "--wander-remote-dir",
