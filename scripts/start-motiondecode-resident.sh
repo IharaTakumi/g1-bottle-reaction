@@ -53,7 +53,7 @@ PY
 REMOTE
 
 # Receive-only inspection: this creates readers but never an Arm command writer.
-"${ssh_base[@]}" "cd '$code' && PYTHONPATH='$deps:$code/scripts:/home/unitree/unitree_sdk2_python' '$python' -B scripts/inspect_arm_sdk_publishers.py --network-interface eth0 --seconds 15 --json /tmp/motiondecode-arm-identity.json >/dev/null && cat /tmp/motiondecode-arm-identity.json" >"$report"
+"${ssh_base[@]}" "cd '$code' && mkdir -p output/live && PYTHONPATH='$deps:$code/scripts:/home/unitree/unitree_sdk2_python' '$python' -B scripts/inspect_arm_sdk_publishers.py --network-interface eth0 --seconds 15 --json output/live/motiondecode-arm-identity.json >/dev/null && cat output/live/motiondecode-arm-identity.json" >"$report"
 arm_pid=$("$script_root/scripts/reaction-runtime-validate.py" arm "$report" --source-ip "$source_ip")
 "${ssh_base[@]}" "printf '%s\n' '$arm_pid' > '$arm_pid_file'"
 

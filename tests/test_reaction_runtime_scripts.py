@@ -58,6 +58,7 @@ def test_production_paths_and_start_are_fail_closed() -> None:
     assert "/tmp/motiondecode-current" not in text
     assert "/tmp/motiondecode-hold-deps" not in text
     assert "MOTIONDECODE_EXPECTED_ARM_PID" not in text
+    assert "--json /tmp/" not in text
     assert "RUNTIME_NOT_INSTALLED" in text and "RUNTIME_HASH_MISMATCH" in text
     assert "PROCESS_WITHOUT_SOCKET_FAIL_CLOSED" in text
     assert "HEALTHY_RESIDENT_REUSED" in text
