@@ -8,7 +8,7 @@ G1の既存Python 3.8、unitree_sdk2py、cycloneddsを使用し、G1へファイ
 音量はユーザー指定で85。カメラサービス/SDK/system設定には変更を加えていません。
 
 Reactionは明示的に `--found-audio` を指定した場合だけ有効です。G1内蔵カメラのYOLO結果だけを使います。
-person、banana、plushieを同時検出した場合はperson → banana → plushieの順に優先し、
+person、banana、plushieを同時検出した場合はplushie → banana → personの順に優先し、
 音声やmotionを重ねたりqueueへ溜めたりしません。plushieはYOLO COCOの`teddy bear`（class 77）を意味します。
 object音声の再生中に高優先度の対象が現れた場合は、再生を途中で切らず、終了後に判定します。
 従来のカメラreader・YOLO worker・USB表示と固定WAVを維持し、発火先を初期実装から残る
@@ -46,13 +46,36 @@ cloneした環境でもそのまま利用できます。
 
 - `assets/audio/reactions/person/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（旧f0e5...音声）
 - `assets/audio/reactions/banana/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（banana_surprised.wav）
-- `assets/audio/reactions/plushie/detected.wav`: PCM WAV、44,100 Hz、16bit、mono（plushie_affectionate.wav）
+- `assets/audio/reactions/plushie/plushie_affectionate.wav`: PCM WAV、44,100 Hz、16bit、mono
 
 bananaも0.3秒継続検出後に1回だけ再生します。実機で短い検出抜けが見られたためbananaだけ0.30秒まで
 検出抜けを許容し、画面から1秒以上消えた後に再発火可能です。
-plushieも同じ0.3秒継続、0.30秒dropout grace、2秒cooldown、1秒absenceの設定で、
+plushieは0.3秒継続、1.0秒dropout grace、2秒cooldown、3秒の明示的不在で、
 画面に映り続ける間はユーザー提供音声を1回だけ再生します。
 実際に使ったフルパスは `FOUND AUDIO: /home/.../xxxx.wav` とconsoleに出力します。
+
+## Plushie AFFECTION / JOY minimal integration
+
+`--robot motiondecode` を選んだ場合、confirmed object eventを既存の
+`ReactionEvent.YOLO_*_FOUND`として共有Reaction Engineへ渡し、
+person=`motiondecode:found`、banana=`motiondecode:surprise`、
+plushie=`motiondecode:joy`とそれぞれの既存WAVを同じjobから並列開始します。
+実機実行は所有runtime側で`real_g1_validated=true`のreactionだけに限定し、未validated motionは
+adapterとresidentの両方でfail-closedです。全対象modeの優先順はplushie → banana → personです。
+
+wireless G1 JPEG経路で実測した低い有効frame rateに対し、confirmation thresholdは
+0.3秒のまま、plushieだけdropout graceを1.0秒、rearm連続陰性を3.0秒にします。同一resultの再利用は拒否され、
+camera/YOLO停止・stale・新規観測なしでは不在時間を進めません。また、最後のplushie領域の10%以上を覆うperson誤分類も不在として数えません。
+異なる2つ以上のfresh positive frameがない限り発火しません。
+
+`--quiet-mode`は再生用の一時PCMだけを`config/yolo_objects.yaml`の
+`quiet_mode_gain_db`（会場調整値 -24 dB）で減衰します。元WAVとOS/G1のvolume設定は変更しません。
+実機MotionDecodeでは`--enable-real-robot --confirm-site-ready`を必須とします。
+`--quiet-mode`指定時だけ音声を-24 dB減衰し、未指定時は元WAVを通常音量で再生します。
+
+実機の`motiondecode:joy`はglobal metadataを変更せずfail-closedを維持します。
+attended hackathon実行でplushieまたはallを選ぶ場合に限り、
+`--allow-hackathon-joy`を明示してください。既定値はOFFです。
 固定音声なら `--found-sound /absolute/path.wav`。存在・非空PCM WAVを起動前に検証します。
 
 ユーザーの指定により、既定出力は**G1本体スピーカー**です。
@@ -108,6 +131,17 @@ ssh -M -S /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-contr
 ```bash
 G1_ALLOW_REAL_ACTION=1 /home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 10.42.0.1 --usb-host 10.42.0.76 --network-interface wlp128s20f3 --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control --g1-camera-transport ssh-rtp --g1-camera-port 56001 --g1-camera-fps 30 --no-usb-camera --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --plushie-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0 --robot g1-ssh --enable-real-robot --g1-motion safe-actions --execute-real-action
 ```
+
+Mapless Wanderとのゲーム統合は、同じ実機確認済みオプションへ明示的なinterlockだけを追加します。
+PC2側で`wip/mapless-wander-real-g1-20260917`をcheckout済みの場合の起動コマンドは次の1本です。
+
+```bash
+G1_ALLOW_REAL_ACTION=1 /home/ubuntu/.venvs/g1-game-vision/bin/python -B /home/ubuntu/dev/g1-bottle-reaction/tools/g1_dual_camera.py --usb-bind 10.42.0.1 --usb-host 10.42.0.76 --network-interface wlp128s20f3 --ssh-control /home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control --g1-camera-transport ssh-rtp --g1-camera-port 56001 --g1-camera-fps 30 --no-usb-camera --windowed --yolo --yolo-confidence 0.25 --banana-confidence 0.25 --plushie-confidence 0.25 --found-audio --found-output g1 --found-duration 0.3 --audio-cooldown 2.0 --robot g1-ssh --enable-real-robot --g1-motion safe-actions --execute-real-action --with-wander --wander-ssh-target unitree@10.42.0.76 --wander-remote-dir /home/ubuntu/dev/g1-bottle-reaction-wander
+```
+
+Reaction直前にPID・process生存・cmdlineを確認してSIGTERMし、process終了を確認できた場合だけ
+Reactionを開始します。SIGKILLへの自動fallbackはありません。Reaction成功時だけWanderを再起動し、
+失敗・timeout・motion不確実時は停止状態を維持します。
 
 `--ssh-target`省略時は`unitree@10.42.0.76`が自動選択され、USB senderとG1 speakerが同じSSH先を使います。
 G1上の音声helperにある`eth0`はG1内部のUnitree DDS用であり、UbuntuからG1へのSSH宛先ではありません。

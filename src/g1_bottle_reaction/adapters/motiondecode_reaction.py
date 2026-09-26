@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import shlex
 import socket
@@ -15,6 +16,50 @@ from .robot import RobotAdapter
 
 MOTION_PREFIX = "motiondecode:"
 VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found", "joy"})
+# Keep real execution aligned with motiondecode-test/config/named_reactions.json.
+# ``joy`` remains available for dry-run compatibility but is explicitly marked
+# real_g1_validated=false by the owning runtime.
+REAL_G1_VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found"})
+
+
+class MotionDecodeSafeReturnMiss(RuntimeError):
+    """A failed q0 return whose independent resident postflight is fully safe."""
+
+    def __init__(self, reaction: str, result: dict[str, Any],
+                 resident_status: dict[str, Any]) -> None:
+        self.reaction = reaction
+        self.result = dict(result)
+        self.controlled_q0_return_error_rad = result.get(
+            "controlled_q0_return_error_rad"
+        )
+        self.returned_to_q0 = result.get("returned_to_q0")
+        self.resident_status = dict(resident_status)
+        super().__init__(
+            f"reaction={reaction} returned_to_q0={self.returned_to_q0} "
+            f"controlled_q0_return_error_rad="
+            f"{self.controlled_q0_return_error_rad}"
+        )
+
+
+def _resident_postflight_is_safe(status: dict[str, Any]) -> bool:
+    """Require the complete post-reaction resident safety contract."""
+    age = status.get("lowstate_age_s")
+    weight = status.get("weight")
+    return bool(
+        status.get("accepted") is True
+        and status.get("state") == "READY"
+        and isinstance(age, (int, float))
+        and not isinstance(age, bool)
+        and math.isfinite(float(age))
+        and 0.0 <= float(age) < 0.15
+        and status.get("ownership_safe") is True
+        and status.get("external_writers") == 0
+        and isinstance(weight, (int, float))
+        and not isinstance(weight, bool)
+        and float(weight) == 0.0
+        and status.get("fault") is None
+        and "status_error" not in status
+    )
 
 
 class LocalResidentChannel:
@@ -100,6 +145,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         ssh_control: str | None = None,
         timeout_seconds: float = 420.0,
         attended_real: bool = False,
+        allow_hackathon_joy: bool = False,
         python: Path | None = None,
         environ: dict[str, str] | None = None,
         run_factory: Callable[..., Any] = subprocess.run,
@@ -113,6 +159,8 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             raise RuntimeError("Real MotionDecode requires explicit real-robot enable")
         if attended_real and not real:
             raise ValueError("Attended gate is valid only for real MotionDecode")
+        if allow_hackathon_joy and not real:
+            raise ValueError("Hackathon JOY gate is valid only for real MotionDecode")
         if transport not in {"local", "ssh"}:
             raise ValueError("MotionDecode transport must be local or ssh")
         if timeout_seconds <= 0:
@@ -125,6 +173,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self.ssh_control = ssh_control
         self.timeout_seconds = timeout_seconds
         self.attended_real = attended_real
+        self.allow_hackathon_joy = bool(allow_hackathon_joy)
         self.python = python or self.repository / ".venv" / "bin" / "python"
         self.environ = environ
         self._run_factory = run_factory
@@ -136,6 +185,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self._last_motion: str | None = None
         self._last_succeeded = False
         self._last_result: dict[str, Any] | None = None
+        self._last_preflight_error = ""
         self._channel = None
         if self.resident:
             self._channel = (channel_factory() if channel_factory else
@@ -152,6 +202,28 @@ class MotionDecodeReactionAdapter(RobotAdapter):
     @property
     def last_result(self) -> dict[str, Any] | None:
         return None if self._last_result is None else dict(self._last_result)
+
+    @property
+    def last_preflight_error(self) -> str:
+        return self._last_preflight_error
+
+    def preflight_motion(self) -> bool:
+        """Check the resident worker's receive-only start gates."""
+        self._last_preflight_error = ""
+        if not self.resident or self._channel is None:
+            self._last_preflight_error = "resident preflight is unavailable"
+            return False
+        try:
+            result = self._channel.request({"operation": "preflight"})
+        except Exception as exc:
+            self._last_preflight_error = str(exc)
+            return False
+        if result.get("accepted") is True and result.get("passed") is True:
+            return True
+        self._last_preflight_error = str(
+            result.get("reason") or f"unsafe MotionDecode preflight: {result}"
+        )
+        return False
 
     @staticmethod
     def reaction_name(motion: str) -> str | None:
@@ -189,6 +261,15 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             return
         if self._shutdown.is_set():
             raise RuntimeError("MotionDecode adapter is shutting down")
+        hackathon_joy_allowed = (
+            reaction == "joy" and self.allow_hackathon_joy
+        )
+        if (self.real and reaction not in REAL_G1_VALIDATED_REACTIONS
+                and not hackathon_joy_allowed):
+            raise RuntimeError(
+                f"MotionDecode reaction is not validated for real G1: {reaction}; "
+                "JOY requires the explicit hackathon allow gate"
+            )
         if not self._operation_lock.acquire(blocking=False):
             raise RuntimeError("Another robot motion is already executing")
         self._last_motion = motion
@@ -215,17 +296,62 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                           if self.attended_real else parse_named_result(completed.stdout))
             if result.get("reaction") != reaction or result.get("status") != "pass":
                 raise RuntimeError(f"MotionDecode CLI returned failure: {result}")
+            if self.real and self.resident:
+                # Preserve the complete fail-closed evidence even when a
+                # cleanup field below rejects the result.
+                print(
+                    "MOTIONDECODE RESULT: " + json.dumps(result, sort_keys=True),
+                    flush=True,
+                )
+            self._last_result = result
             if self.real:
                 proof = bool(result.get("executed") and result.get("released"))
                 if self.resident:
-                    proof = proof and bool(result.get("weight_zero"))
+                    cleanup_except_return = proof and bool(
+                        result.get("motion_completed")
+                        and result.get("weight_zero")
+                        and result.get("hard_fault") is None
+                    )
+                    if (cleanup_except_return
+                            and result.get("returned_to_q0") is False):
+                        post_status = self._channel.request({"operation": "status"})
+                        if _resident_postflight_is_safe(post_status):
+                            raise MotionDecodeSafeReturnMiss(
+                                reaction, result, post_status
+                            )
+                        raise RuntimeError(
+                            "Real MotionDecode safe-return miss has unsafe or "
+                            "ambiguous resident postflight: "
+                            + json.dumps(post_status, sort_keys=True)
+                        )
+                    proof = cleanup_except_return and bool(
+                        result.get("returned_to_q0")
+                    )
                 else:
                     proof = proof and bool(result.get("returned_to_q0"))
                 if not proof:
                     raise RuntimeError("Real MotionDecode result lacks required cleanup proof")
             if not self.real and result.get("executed"):
                 raise RuntimeError("MotionDecode dry-run unexpectedly executed")
-            self._last_result = result
+            timing = {
+                key: result.get(key)
+                for key in (
+                    "reaction_engine_trigger_monotonic_s",
+                    "worker_receive_monotonic_s",
+                    "acquire_start_monotonic_s",
+                    "clip_start_monotonic_s",
+                    "execution_completed_monotonic_s",
+                    "worker_to_acquire_s",
+                    "trigger_to_clip_s",
+                )
+                if key in result
+            }
+            if timing:
+                print(
+                    "MOTIONDECODE TIMING: "
+                    + json.dumps(timing, sort_keys=True),
+                    flush=True,
+                )
             self._last_succeeded = True
         finally:
             self._operation_lock.release()
