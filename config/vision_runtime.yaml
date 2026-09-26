@@ -1,0 +1,17 @@
+network_interface: wlp128s20f3
+local_ip: 10.42.0.1
+g1_ip: 10.42.0.76
+ssh_target: unitree@10.42.0.76
+camera_transport: ssh-rtp
+camera_port: 56001
+camera_fps: 30
+expected_resolution: 1920x1080
+minimum_ready_fps: 1.0
+minimum_ready_frames: 3
+maximum_frame_age_ms: 500.0
+maximum_status_age_seconds: 8.0
+maximum_rtp_lost: 0
+python: /home/ubuntu/.venvs/g1-game-vision/bin/python
+model: /home/ubuntu/g1-runtime/vision/models/yolo11n.pt
+model_sha256: 0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1
+yolo_fps: 15
