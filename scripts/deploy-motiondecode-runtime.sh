@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=scripts/reaction-ssh.sh
+source "$script_root/scripts/reaction-ssh.sh"
+reaction_ssh_init
 bundle=${MOTIONDECODE_KNOWN_GOOD_BUNDLE:-/home/ubuntu/dev/g1-bottle-reaction/.runtime/motiondecode-known-good}
-target=${G1_SSH_TARGET:-unitree@10.42.0.76}
-control=${G1_SSH_CONTROL:-/home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control}
+target=$REACTION_SSH_TARGET
+control=$REACTION_SSH_CONTROL
 production=${MOTIONDECODE_PRODUCTION_ROOT:-/home/unitree/g1-runtime/motiondecode}
 fail() { echo "DEPLOY_REFUSED: $*" >&2; exit 2; }
 test -d "$bundle/code" || fail "known-good code missing: $bundle/code"
@@ -18,8 +22,8 @@ if [[ ${1:-} == --dry-run ]]; then
   exit 0
 fi
 [[ $# == 0 ]] || fail "usage: $0 [--dry-run]"
-test -S "$control" || fail "SSH ControlMaster socket missing: $control"
-ssh_base=(ssh -T -o BatchMode=yes -o ConnectTimeout=3 -S "$control" -- "$target")
+reaction_ssh_ensure || exit $?
+ssh_base=("${reaction_ssh_base[@]}")
 state=$("${ssh_base[@]}" /bin/bash -s -- "$production" <<'REMOTE'
 set -euo pipefail
 root=$1
@@ -33,7 +37,7 @@ if [[ $state == ALREADY_READY ]]; then echo ALREADY_READY; exit 0; fi
 parent=$(dirname "$production")
 stage=$("${ssh_base[@]}" "mkdir -p '$parent' && mktemp -d '$parent/.motiondecode.stage.XXXXXX'")
 case "$stage" in "$parent"/.motiondecode.stage.*) ;; *) fail "invalid stage: $stage";; esac
-rsync_ssh="ssh -o BatchMode=yes -o ConnectTimeout=3 -S $control"
+rsync_ssh="$REACTION_SSH_BIN -o BatchMode=yes -o ConnectTimeout=3 -S $control"
 rsync -a -e "$rsync_ssh" -- "$bundle/code/" "$target:$stage/code/"
 rsync -a -e "$rsync_ssh" -- "$bundle/deps/" "$target:$stage/deps/"
 rsync -a -e "$rsync_ssh" -- "$bundle/BUNDLE_MANIFEST.sha256" "$bundle/BUNDLE_INFO.txt" "$target:$stage/"

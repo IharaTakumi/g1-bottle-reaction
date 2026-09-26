@@ -2,8 +2,11 @@
 set -euo pipefail
 
 script_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-target=${G1_SSH_TARGET:-unitree@10.42.0.76}
-control=${G1_SSH_CONTROL:-/home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control}
+# shellcheck source=scripts/reaction-ssh.sh
+source "$script_root/scripts/reaction-ssh.sh"
+reaction_ssh_init
+target=$REACTION_SSH_TARGET
+control=$REACTION_SSH_CONTROL
 runtime=${MOTIONDECODE_PRODUCTION_ROOT:-/home/unitree/g1-runtime/motiondecode}
 code=$runtime/code
 deps=$runtime/deps
@@ -13,13 +16,14 @@ source_ip=${MOTIONDECODE_ARM_SOURCE_IP:-192.168.123.161}
 
 if [[ ${1:-} == --dry-run ]]; then
   echo "DRY_RUN_READY_CHECK: no SSH, process start, DDS writer, or robot command"
+  echo "REACTION_SSH_CONTROL=$control"
   echo "RUNTIME=$runtime CODE=$code DEPS=$deps SOCKET=$socket"
   echo "CHECKS=manifests,python,mujoco,assets,LowState,stationary,ArmIdentity,ArmAction,resident,preflight,fault"
   exit 0
 fi
 [[ $# == 0 ]] || { echo "usage: $0 [--dry-run]" >&2; exit 2; }
-[[ -S $control ]] || { echo "SSH ControlMaster socket missing: $control" >&2; exit 2; }
-ssh_base=(ssh -T -o BatchMode=yes -o ConnectTimeout=3 -S "$control" -- "$target")
+reaction_ssh_ensure || exit $?
+ssh_base=("${reaction_ssh_base[@]}")
 report=$(mktemp /tmp/reaction-ready-arm.XXXXXX.json)
 status_file=$(mktemp /tmp/reaction-ready-status.XXXXXX.json)
 trap 'rm -f -- "$report" "$status_file"' EXIT
