@@ -356,6 +356,7 @@ def safe_resident_status(**overrides):
         "accepted": True,
         "state": "READY",
         "mode": "real",
+        "session_id": "test-session",
         "lowstate_age_s": 0.01,
         "ownership_safe": True,
         "external_writers": 0,

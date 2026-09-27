@@ -174,7 +174,8 @@ class FakeResidentChannel:
     def request(self, payload):
         self.requests.append(payload)
         if payload["operation"] == "status":
-            return {"accepted": True, "state": "READY", "mode": self.mode}
+            return {"accepted": True, "state": "READY", "mode": self.mode,
+                    "session_id": "test-session"}
         return {"accepted": True, "state": "READY", "reaction": payload["reaction"],
                 "status": "pass", "executed": False, "released": True,
                 "returned_to_q0": True}
@@ -241,7 +242,8 @@ def test_real_resident_requires_full_cleanup_proof(
     class RealChannel(FakeResidentChannel):
         def request(self, payload):
             if payload["operation"] == "status":
-                return {"accepted": True, "state": "READY", "mode": "real"}
+                return {"accepted": True, "state": "READY", "mode": "real",
+                        "session_id": "test-session"}
             result = {
                 "accepted": True,
                 "state": "READY",
@@ -285,6 +287,7 @@ def safe_resident_status(**overrides) -> dict:
         "accepted": True,
         "state": "READY",
         "mode": "real",
+        "session_id": "test-session",
         "lowstate_age_s": 0.01,
         "ownership_safe": True,
         "external_writers": 0,
@@ -407,7 +410,8 @@ def test_real_adapter_allows_joy_only_with_explicit_hackathon_gate(tmp_path: Pat
         def request(self, payload):
             self.requests.append(payload)
             if payload["operation"] == "status":
-                return {"accepted": True, "state": "READY", "mode": "real"}
+                return {"accepted": True, "state": "READY", "mode": "real",
+                        "session_id": "test-session"}
             return {
                 "accepted": True,
                 "state": "READY",

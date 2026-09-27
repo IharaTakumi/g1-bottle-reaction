@@ -15,7 +15,8 @@ from g1_bottle_reaction.game_vision.wander_interlock import RemoteWanderControll
 
 class Resident:
     def __init__(self, mode):
-        self.status = {"accepted": True, "state": "READY", "mode": mode}
+        self.status = {"accepted": True, "state": "READY", "mode": mode,
+                       "session_id": "test-session"}
         self.calls = []
         self.closed = False
 
@@ -39,6 +40,84 @@ class Resident:
 
     def close(self):
         self.closed = True
+
+
+@pytest.mark.parametrize("bad_session", [None, "", " ", 1, True, [], {}])
+def test_resident_missing_or_invalid_session_refuses_old_server(tmp_path, bad_session):
+    worker = Resident("dry-run")
+    worker.status["session_id"] = bad_session
+    if bad_session is None:
+        worker.status.pop("session_id")
+    with pytest.raises(RuntimeError, match="session_id"):
+        MotionDecodeReactionAdapter(tmp_path, channel_factory=lambda: worker)
+    assert worker.calls == [{"operation": "status"}]
+    assert worker.executes == [] and worker.closed
+
+
+@pytest.mark.parametrize("real", [False, True])
+def test_resident_binding_is_sent_to_preflight_and_execute(tmp_path, real):
+    worker = Resident("real" if real else "dry-run")
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path, real=real, enabled=real, channel_factory=lambda: worker)
+    try:
+        assert adapter.preflight_motion()
+        adapter.play_motion("motiondecode:found")
+        bound = [c for c in worker.calls if c["operation"] != "status"]
+        assert [c["operation"] for c in bound] == ["preflight", "execute"]
+        assert all(c["expected_mode"] == worker.status["mode"] and
+                   c["expected_session_id"] == "test-session" for c in bound)
+    finally:
+        adapter.close()
+
+
+def test_session_change_at_status_latches_without_execute(tmp_path):
+    worker = Resident("dry-run")
+    adapter = MotionDecodeReactionAdapter(tmp_path, channel_factory=lambda: worker)
+    try:
+        worker.status["session_id"] = "replacement"
+        with pytest.raises(RuntimeError, match="session mismatch"):
+            adapter.play_motion("motiondecode:found")
+        calls = list(worker.calls)
+        worker.status["session_id"] = "test-session"
+        assert not adapter.preflight_motion()
+        with pytest.raises(RuntimeError, match="session mismatch"):
+            adapter.play_motion("motiondecode:found")
+        assert worker.calls == calls
+        assert worker.executes == []
+        assert adapter._expected_resident_session == "test-session"
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("operation", ["preflight", "execute"])
+@pytest.mark.parametrize("reason", ["resident mode mismatch", "resident session mismatch"])
+def test_binding_rejection_after_fresh_status_never_refreshes_or_retries(tmp_path, operation, reason):
+    class ReplacedResident(Resident):
+        def request(self, payload):
+            if payload["operation"] == operation:
+                self.calls.append(payload)
+                assert payload["expected_session_id"] == "test-session"
+                self.status["session_id"] = "replacement"
+                return {"accepted": False, "state": "READY", "reason": reason}
+            return super().request(payload)
+
+    worker = ReplacedResident("dry-run")
+    adapter = MotionDecodeReactionAdapter(tmp_path, channel_factory=lambda: worker)
+    try:
+        if operation == "preflight":
+            assert not adapter.preflight_motion()
+        else:
+            with pytest.raises(RuntimeError, match="mismatch"):
+                adapter.play_motion("motiondecode:found")
+        calls = list(worker.calls)
+        assert [c["operation"] for c in calls] == ["status", "status", operation]
+        assert not adapter.preflight_motion()
+        with pytest.raises(RuntimeError, match="mismatch"):
+            adapter.play_motion("motiondecode:found")
+        assert worker.calls == calls
+        assert adapter._expected_resident_session == "test-session"
+    finally:
+        adapter.close()
 
 
 @pytest.mark.parametrize("real,mode", [(False, "dry-run"), (True, "real")])
