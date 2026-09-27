@@ -320,7 +320,8 @@ def test_remote_controller_uses_verified_pid_and_never_sigkills():
         return subprocess.CompletedProcess(command, 0, next(responses), "")
 
     controller = RemoteWanderController(
-        "unitree@pc2", ssh_control="/tmp/control", runner=runner
+        "unitree@pc2", robot="g1", enable_real_robot=True,
+        operator_approved=True, ssh_control="/tmp/control", runner=runner
     )
     controller.start()
     controller.stop_and_wait()

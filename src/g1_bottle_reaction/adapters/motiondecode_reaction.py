@@ -186,6 +186,10 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self._last_succeeded = False
         self._last_result: dict[str, Any] | None = None
         self._last_preflight_error = ""
+        # Reuse the resident's existing modes (also used by the integrated
+        # supervisor's dedicated dry-run worker), never infer mode from a path.
+        self._expected_resident_mode = "real" if real else "dry-run"
+        self._resident_gate_error = ""
         self._channel = None
         if self.resident:
             self._channel = (channel_factory() if channel_factory else
@@ -194,10 +198,35 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                  SshResidentChannel(target=ssh_target, control=ssh_control,
                                     remote_root=remote_root, socket_path=socket_path,
                                     timeout=timeout_seconds)))
-            status = self._channel.request({"operation": "status"})
-            if not status.get("accepted") or status.get("state") != "READY":
+            try:
+                self._require_resident_ready()
+            except Exception:
                 self._channel.close(); self._channel = None
+                raise
+
+    def _require_resident_ready(self) -> None:
+        """Check fresh existing status before execute; a failed gate is latched.
+
+        The external worker protocol has no verified atomic mode/session-bound
+        execute operation. This check cannot fence a restart between status and
+        execute; that requires a coordinated change in the owning repository.
+        """
+        if self._resident_gate_error:
+            raise RuntimeError(self._resident_gate_error)
+        try:
+            status = self._channel.request({"operation": "status"})
+            if not isinstance(status, dict):
+                raise RuntimeError("MotionDecode resident status must be an object")
+            if status.get("accepted") is not True or status.get("state") != "READY":
                 raise RuntimeError(f"MotionDecode resident worker is not READY: {status}")
+            if status.get("mode") != self._expected_resident_mode:
+                raise RuntimeError(
+                    "MotionDecode resident mode mismatch: "
+                    f"expected {self._expected_resident_mode!r}, got {status.get('mode')!r}"
+                )
+        except Exception as exc:
+            self._resident_gate_error = f"MotionDecode resident gate failed: {exc}"
+            raise RuntimeError(self._resident_gate_error) from exc
 
     @property
     def last_result(self) -> dict[str, Any] | None:
@@ -214,6 +243,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             self._last_preflight_error = "resident preflight is unavailable"
             return False
         try:
+            self._require_resident_ready()
             result = self._channel.request({"operation": "preflight"})
         except Exception as exc:
             self._last_preflight_error = str(exc)
@@ -277,6 +307,9 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         try:
             trigger = time.monotonic()
             if self.resident:
+                # Hold the operation lock across the fresh mode check and send.
+                # Startup/preflight status must never authorize a later worker.
+                self._require_resident_ready()
                 result = self._channel.request({"operation": "execute", "reaction": reaction,
                                                 "trigger_monotonic_s": trigger})
                 if not result.get("accepted"):

@@ -205,6 +205,12 @@ def validate_args(args):
     if not math.isfinite(args.motiondecode_timeout) or args.motiondecode_timeout <= 0:
         raise ValueError("--motiondecode-timeout must be finite and positive")
     if args.with_wander:
+        from .wander_interlock import require_wander_approval
+
+        require_wander_approval(
+            robot=args.robot, enable_real_robot=args.enable_real_robot,
+            operator_approved=args.operator_approved_wander,
+        )
         if not args.found_audio:
             raise ValueError("--with-wander requires --found-audio")
         if not args.wander_ssh_target:
@@ -384,6 +390,9 @@ def run(args):
             wander = RemoteWanderController(
                 args.wander_ssh_target,
                 args.wander_remote_dir,
+                robot=args.robot,
+                enable_real_robot=args.enable_real_robot,
+                operator_approved=args.operator_approved_wander,
                 ssh_control=wander_control,
             )
         if args.patrol_control_socket:

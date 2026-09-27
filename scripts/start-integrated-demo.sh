@@ -47,6 +47,14 @@ if [[ ${1:-} == --dry-run ]]; then
   exit 0
 fi
 
+if [[ $# != 1 || ${1:-} != --operator-approved-wander ]]; then
+  echo 'Real Wander requires explicit --operator-approved-wander (site ready; robot will move)' >&2
+  exit 2
+fi
+# Forward only approval explicitly supplied by the local operator. Never bake
+# this gate into the default production command or perform SSH before it.
+command+=(--operator-approved-wander)
+
 "$root/scripts/check-demo-ready.sh"
 cd "$root"
 exec "${command[@]}"

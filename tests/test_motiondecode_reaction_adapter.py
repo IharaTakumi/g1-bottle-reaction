@@ -167,13 +167,14 @@ def test_result_parser_rejects_ambiguous_output() -> None:
 
 
 class FakeResidentChannel:
-    def __init__(self):
+    def __init__(self, mode="dry-run"):
+        self.mode = mode
         self.requests = []; self.closed = False
 
     def request(self, payload):
         self.requests.append(payload)
         if payload["operation"] == "status":
-            return {"accepted": True, "state": "READY"}
+            return {"accepted": True, "state": "READY", "mode": self.mode}
         return {"accepted": True, "state": "READY", "reaction": payload["reaction"],
                 "status": "pass", "executed": False, "released": True,
                 "returned_to_q0": True}
@@ -188,8 +189,8 @@ def test_resident_adapter_connects_at_start_and_reuses_channel(tmp_path: Path) -
     adapter.play_motion("motiondecode:surprise")
     adapter.play_motion("motiondecode:found")
     assert [request["operation"] for request in channel.requests] == [
-        "status", "execute", "execute"]
-    assert all("trigger_monotonic_s" in request for request in channel.requests[1:])
+        "status", "status", "execute", "status", "execute"]
+    assert all("trigger_monotonic_s" in request for request in channel.requests if request["operation"] == "execute")
     adapter.close(); assert channel.closed
 
 
@@ -214,7 +215,7 @@ def test_resident_preflight_is_status_only_and_reports_failure(tmp_path: Path) -
     assert adapter.preflight_motion() is False
     assert adapter.last_preflight_error == "robot not stable"
     assert [request["operation"] for request in channel.requests] == [
-        "status", "preflight", "preflight",
+        "status", "status", "preflight", "status", "preflight",
     ]
 
 
@@ -240,7 +241,7 @@ def test_real_resident_requires_full_cleanup_proof(
     class RealChannel(FakeResidentChannel):
         def request(self, payload):
             if payload["operation"] == "status":
-                return {"accepted": True, "state": "READY"}
+                return {"accepted": True, "state": "READY", "mode": "real"}
             result = {
                 "accepted": True,
                 "state": "READY",
@@ -283,6 +284,7 @@ def safe_resident_status(**overrides) -> dict:
     status = {
         "accepted": True,
         "state": "READY",
+        "mode": "real",
         "lowstate_age_s": 0.01,
         "ownership_safe": True,
         "external_writers": 0,
@@ -335,7 +337,7 @@ def test_safe_return_miss_raises_typed_failure_then_allows_next_success(
     adapter.play_motion("motiondecode:joy")
     assert adapter.wait_for_motion_complete("motiondecode:joy") is True
     assert [request["operation"] for request in channel.requests] == [
-        "status", "execute", "status", "execute"
+        "status", "status", "execute", "status", "status", "execute"
     ]
 
 
@@ -355,8 +357,8 @@ def test_safe_return_miss_with_unsafe_postflight_is_hard_failure(
     channel = ResultSequenceChannel(
         [real_result("found", returned_to_q0=False,
                      controlled_q0_return_error_rad=0.0322)],
-        # First status constructs the adapter; second is the postflight.
-        [safe_resident_status(), unsafe_status],
+        # Startup and pre-execute status precede the postflight.
+        [safe_resident_status(), safe_resident_status(), unsafe_status],
     )
     adapter = MotionDecodeReactionAdapter(
         tmp_path, real=True, enabled=True, channel_factory=lambda: channel
@@ -370,7 +372,8 @@ def test_safe_return_miss_status_ipc_failure_remains_hard_failure(
 ) -> None:
     class StatusFailureChannel(ResultSequenceChannel):
         def request(self, payload):
-            if payload["operation"] == "status" and self.requests:
+            if payload["operation"] == "status" and any(
+                    item["operation"] == "execute" for item in self.requests):
                 self.requests.append(payload)
                 raise RuntimeError("status IPC failed")
             return super().request(payload)
@@ -387,7 +390,7 @@ def test_safe_return_miss_status_ipc_failure_remains_hard_failure(
 
 
 def test_real_adapter_rejects_unvalidated_joy_before_execute(tmp_path: Path) -> None:
-    channel = FakeResidentChannel()
+    channel = FakeResidentChannel(mode="real")
     adapter = MotionDecodeReactionAdapter(
         tmp_path,
         real=True,
@@ -404,7 +407,7 @@ def test_real_adapter_allows_joy_only_with_explicit_hackathon_gate(tmp_path: Pat
         def request(self, payload):
             self.requests.append(payload)
             if payload["operation"] == "status":
-                return {"accepted": True, "state": "READY"}
+                return {"accepted": True, "state": "READY", "mode": "real"}
             return {
                 "accepted": True,
                 "state": "READY",
@@ -429,7 +432,7 @@ def test_real_adapter_allows_joy_only_with_explicit_hackathon_gate(tmp_path: Pat
     adapter.play_motion("motiondecode:joy")
     assert adapter.wait_for_motion_complete("motiondecode:joy")
     assert [request["operation"] for request in channel.requests] == [
-        "status", "execute"
+        "status", "status", "execute"
     ]
 
 

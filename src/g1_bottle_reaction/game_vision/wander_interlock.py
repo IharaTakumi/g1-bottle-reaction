@@ -10,6 +10,17 @@ class WanderInterlockError(RuntimeError):
     pass
 
 
+def require_wander_approval(*, robot: str, enable_real_robot: bool,
+                            operator_approved: bool) -> None:
+    """Require caller intent before creating any remote Wander operation."""
+    if (robot not in {"g1", "g1-ssh", "motiondecode"}
+            or enable_real_robot is not True or operator_approved is not True):
+        raise ValueError(
+            "Remote Wander requires a real --robot, --enable-real-robot and "
+            "--operator-approved-wander (site ready; robot will move)"
+        )
+
+
 class RemoteWanderController:
     """Start and safely stop one verified remote Wander process."""
 
@@ -22,10 +33,17 @@ class RemoteWanderController:
         ssh_target: str,
         remote_dir: str = "/home/ubuntu/dev/g1-bottle-reaction-wander",
         *,
+        robot: str = "mock",
+        enable_real_robot: bool = False,
+        operator_approved: bool = False,
         ssh_control: str | None = None,
         stop_timeout: float = 5.0,
         runner=subprocess.run,
     ) -> None:
+        require_wander_approval(
+            robot=robot, enable_real_robot=enable_real_robot,
+            operator_approved=operator_approved,
+        )
         if not ssh_target:
             raise ValueError("Wander SSH target is required")
         if stop_timeout <= 0:

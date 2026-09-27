@@ -85,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="opt in to remote Mapless Wander with stop-before-reaction interlock",
     )
     parser.add_argument(
+        "--operator-approved-wander", action="store_true",
+        help="explicitly confirm the site is ready and authorize real Wander locomotion",
+    )
+    parser.add_argument(
         "--patrol-control-socket",
         help="absolute local Patrol pause/resume/status Unix socket",
     )
@@ -233,6 +237,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.with_wander and args.source != "dual":
+            raise ValueError("--with-wander requires --source dual")
         if args.found_audio and (not args.yolo or args.source != "dual"):
             raise ValueError("--found-audio requires --source dual --yolo")
         if args.yolo and args.source != "dual":
