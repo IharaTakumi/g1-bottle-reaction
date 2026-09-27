@@ -16,7 +16,7 @@ from g1_bottle_reaction.game_vision.wander_interlock import RemoteWanderControll
 class Resident:
     def __init__(self, mode):
         self.status = {"accepted": True, "state": "READY", "mode": mode,
-                       "session_id": "test-session"}
+                       "protocol_version": 2, "session_id": "test-session"}
         self.calls = []
         self.closed = False
 
@@ -24,9 +24,9 @@ class Resident:
         self.calls.append(payload)
         if payload["operation"] == "status":
             return dict(self.status)
-        if payload["operation"] == "preflight":
+        if payload["operation"] == "preflight_bound":
             return {"accepted": True, "passed": True}
-        assert payload["operation"] == "execute"
+        assert payload["operation"] == "execute_bound"
         return {
             "accepted": True, "reaction": payload["reaction"], "status": "pass",
             "executed": self.status["mode"] == "real", "released": True,
@@ -36,7 +36,7 @@ class Resident:
 
     @property
     def executes(self):
-        return [call for call in self.calls if call["operation"] == "execute"]
+        return [call for call in self.calls if call["operation"] == "execute_bound"]
 
     def close(self):
         self.closed = True
@@ -55,6 +55,20 @@ def test_resident_missing_or_invalid_session_refuses_old_server(tmp_path, bad_se
 
 
 @pytest.mark.parametrize("real", [False, True])
+@pytest.mark.parametrize("version", [None, 1, 3, "2", 2.0, True, [], {}])
+def test_protocol_version_must_be_exactly_two(tmp_path, real, version):
+    worker = Resident("real" if real else "dry-run")
+    worker.status["protocol_version"] = version
+    if version is None:
+        worker.status.pop("protocol_version")
+    with pytest.raises(RuntimeError, match="protocol_version 2"):
+        MotionDecodeReactionAdapter(tmp_path, real=real, enabled=real,
+                                    channel_factory=lambda: worker)
+    assert worker.calls == [{"operation": "status"}]
+    assert worker.executes == [] and worker.closed
+
+
+@pytest.mark.parametrize("real", [False, True])
 def test_resident_binding_is_sent_to_preflight_and_execute(tmp_path, real):
     worker = Resident("real" if real else "dry-run")
     adapter = MotionDecodeReactionAdapter(
@@ -63,7 +77,7 @@ def test_resident_binding_is_sent_to_preflight_and_execute(tmp_path, real):
         assert adapter.preflight_motion()
         adapter.play_motion("motiondecode:found")
         bound = [c for c in worker.calls if c["operation"] != "status"]
-        assert [c["operation"] for c in bound] == ["preflight", "execute"]
+        assert [c["operation"] for c in bound] == ["preflight_bound", "execute_bound"]
         assert all(c["expected_mode"] == worker.status["mode"] and
                    c["expected_session_id"] == "test-session" for c in bound)
     finally:
@@ -89,7 +103,7 @@ def test_session_change_at_status_latches_without_execute(tmp_path):
         adapter.close()
 
 
-@pytest.mark.parametrize("operation", ["preflight", "execute"])
+@pytest.mark.parametrize("operation", ["preflight_bound", "execute_bound"])
 @pytest.mark.parametrize("reason", ["resident mode mismatch", "resident session mismatch"])
 def test_binding_rejection_after_fresh_status_never_refreshes_or_retries(tmp_path, operation, reason):
     class ReplacedResident(Resident):
@@ -104,7 +118,7 @@ def test_binding_rejection_after_fresh_status_never_refreshes_or_retries(tmp_pat
     worker = ReplacedResident("dry-run")
     adapter = MotionDecodeReactionAdapter(tmp_path, channel_factory=lambda: worker)
     try:
-        if operation == "preflight":
+        if operation == "preflight_bound":
             assert not adapter.preflight_motion()
         else:
             with pytest.raises(RuntimeError, match="mismatch"):
@@ -131,7 +145,7 @@ def test_matching_resident_mode_allows_each_execute(tmp_path, real, mode):
             adapter.play_motion("motiondecode:" + reaction)
             assert adapter.wait_for_motion_complete("motiondecode:" + reaction)
         assert [call["operation"] for call in worker.calls] == [
-            "status", "status", "execute", "status", "execute",
+            "status", "status", "execute_bound", "status", "execute_bound",
         ]
         assert len(worker.executes) == 2
     finally:

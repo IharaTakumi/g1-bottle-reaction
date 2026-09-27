@@ -228,8 +228,22 @@ def start_dry_run_resident() -> subprocess.Popen[bytes]:
             raise RuntimeError("MotionDecode dry-run resident exited during startup")
         if DRY_RUN_SOCKET.exists():
             status = resident_request({"operation": "status"})
-            preflight_result = resident_request({"operation": "preflight"})
+            session = status.get("session_id")
+            preflight_result = {"passed": False}
+            if (status.get("accepted") is True and status.get("state") == "READY"
+                    and type(status.get("protocol_version")) is int
+                    and status["protocol_version"] == 2
+                    and status.get("mode") == "dry-run"
+                    and isinstance(session, str) and session.strip()):
+                preflight_result = resident_request({
+                    "operation": "preflight_bound", "expected_mode": "dry-run",
+                    "expected_session_id": session,
+                })
+                if preflight_result.get("accepted") is not True:
+                    stop_group(process, "MOTIONDECODE_DRY_RUN")
+                    raise RuntimeError(f"MotionDecode bound preflight rejected: {preflight_result}")
             if (status.get("state") == "READY" and status.get("mode") == "dry-run"
+                    and preflight_result.get("accepted") is True
                     and preflight_result.get("passed") is True):
                 print(f"MOTIONDECODE_DRY_RUN_PID={process.pid}", flush=True)
                 print("MOTIONDECODE_PREFLIGHT=PASS", flush=True)

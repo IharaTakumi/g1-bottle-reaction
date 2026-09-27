@@ -215,6 +215,9 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                 raise RuntimeError("MotionDecode resident status must be an object")
             if status.get("accepted") is not True or status.get("state") != "READY":
                 raise RuntimeError(f"MotionDecode resident worker is not READY: {status}")
+            version = status.get("protocol_version")
+            if type(version) is not int or version != 2:
+                raise RuntimeError("MotionDecode resident requires protocol_version 2")
             if status.get("mode") != self._expected_resident_mode:
                 raise RuntimeError(
                     "MotionDecode resident mode mismatch: "
@@ -251,7 +254,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             return False
         try:
             self._require_resident_ready()
-            result = self._channel.request({"operation": "preflight", **self._resident_binding()})
+            result = self._channel.request({"operation": "preflight_bound", **self._resident_binding()})
         except Exception as exc:
             self._last_preflight_error = str(exc)
             return False
@@ -319,7 +322,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                 # Hold the operation lock across the fresh mode check and send.
                 # Startup/preflight status must never authorize a later worker.
                 self._require_resident_ready()
-                result = self._channel.request({"operation": "execute", "reaction": reaction,
+                result = self._channel.request({"operation": "execute_bound", "reaction": reaction,
                                                 **self._resident_binding(),
                                                 "trigger_monotonic_s": trigger})
                 if result.get("accepted") is not True:

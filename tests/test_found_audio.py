@@ -356,7 +356,7 @@ def safe_resident_status(**overrides):
         "accepted": True,
         "state": "READY",
         "mode": "real",
-        "session_id": "test-session",
+        "protocol_version": 2, "session_id": "test-session",
         "lowstate_age_s": 0.01,
         "ownership_safe": True,
         "external_writers": 0,
@@ -399,7 +399,7 @@ def test_motiondecode_full_success_results_do_not_latch_sequential_reactions():
             wait_reaction(controller)
             assert controller.motion_error == ""
         assert [request["reaction"] for request in channel.requests
-                if request["operation"] == "execute"] == [
+                if request["operation"] == "execute_bound"] == [
             "found", "surprise", "joy"
         ]
         assert len(output.played) == 3
@@ -424,7 +424,7 @@ def test_motiondecode_cleanup_failure_latches_motion_but_audio_continues(
         assert controller.trigger("banana", 4)
         wait_reaction(controller)
         execute_requests = [
-            request for request in channel.requests if request["operation"] == "execute"
+            request for request in channel.requests if request["operation"] == "execute_bound"
         ]
         assert [request["reaction"] for request in execute_requests] == ["found"]
         assert len(output.played) == 2
@@ -450,7 +450,7 @@ def test_safe_return_miss_does_not_latch_and_next_motion_and_audio_continue():
         assert controller.motion_error == ""
         execute_requests = [
             request for request in channel.requests
-            if request["operation"] == "execute"
+            if request["operation"] == "execute_bound"
         ]
         assert [request["reaction"] for request in execute_requests] == [
             "found", "joy"
@@ -485,7 +485,7 @@ def test_safe_return_miss_with_unsafe_postflight_permanently_latches(
         wait_reaction(controller)
         execute_requests = [
             request for request in channel.requests
-            if request["operation"] == "execute"
+            if request["operation"] == "execute_bound"
         ]
         assert [request["reaction"] for request in execute_requests] == ["found"]
         assert len(output.played) == 2
@@ -497,7 +497,7 @@ def test_safe_return_miss_status_ipc_failure_permanently_latches():
     class PostStatusFailureChannel(SequencedResidentChannel):
         def request(self, payload):
             if payload["operation"] == "status" and any(
-                    item["operation"] == "execute" for item in self.requests):
+                    item["operation"] == "execute_bound" for item in self.requests):
                 self.requests.append(payload)
                 raise RuntimeError("status IPC failed")
             return super().request(payload)
@@ -515,7 +515,7 @@ def test_safe_return_miss_status_ipc_failure_permanently_latches():
         wait_reaction(controller)
         execute_requests = [
             request for request in channel.requests
-            if request["operation"] == "execute"
+            if request["operation"] == "execute_bound"
         ]
         assert [request["reaction"] for request in execute_requests] == ["found"]
         assert len(output.played) == 2

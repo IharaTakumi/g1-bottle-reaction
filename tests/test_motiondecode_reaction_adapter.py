@@ -175,7 +175,7 @@ class FakeResidentChannel:
         self.requests.append(payload)
         if payload["operation"] == "status":
             return {"accepted": True, "state": "READY", "mode": self.mode,
-                    "session_id": "test-session"}
+                    "protocol_version": 2, "session_id": "test-session"}
         return {"accepted": True, "state": "READY", "reaction": payload["reaction"],
                 "status": "pass", "executed": False, "released": True,
                 "returned_to_q0": True}
@@ -190,8 +190,8 @@ def test_resident_adapter_connects_at_start_and_reuses_channel(tmp_path: Path) -
     adapter.play_motion("motiondecode:surprise")
     adapter.play_motion("motiondecode:found")
     assert [request["operation"] for request in channel.requests] == [
-        "status", "status", "execute", "status", "execute"]
-    assert all("trigger_monotonic_s" in request for request in channel.requests if request["operation"] == "execute")
+        "status", "status", "execute_bound", "status", "execute_bound"]
+    assert all("trigger_monotonic_s" in request for request in channel.requests if request["operation"] == "execute_bound")
     adapter.close(); assert channel.closed
 
 
@@ -201,7 +201,7 @@ def test_resident_preflight_is_status_only_and_reports_failure(tmp_path: Path) -
             super().__init__(); self.safe = True
 
         def request(self, payload):
-            if payload["operation"] == "preflight":
+            if payload["operation"] == "preflight_bound":
                 self.requests.append(payload)
                 if self.safe:
                     return {"accepted": True, "state": "READY", "passed": True}
@@ -216,7 +216,7 @@ def test_resident_preflight_is_status_only_and_reports_failure(tmp_path: Path) -
     assert adapter.preflight_motion() is False
     assert adapter.last_preflight_error == "robot not stable"
     assert [request["operation"] for request in channel.requests] == [
-        "status", "status", "preflight", "status", "preflight",
+        "status", "status", "preflight_bound", "status", "preflight_bound",
     ]
 
 
@@ -243,7 +243,7 @@ def test_real_resident_requires_full_cleanup_proof(
         def request(self, payload):
             if payload["operation"] == "status":
                 return {"accepted": True, "state": "READY", "mode": "real",
-                        "session_id": "test-session"}
+                        "protocol_version": 2, "session_id": "test-session"}
             result = {
                 "accepted": True,
                 "state": "READY",
@@ -287,7 +287,7 @@ def safe_resident_status(**overrides) -> dict:
         "accepted": True,
         "state": "READY",
         "mode": "real",
-        "session_id": "test-session",
+        "protocol_version": 2, "session_id": "test-session",
         "lowstate_age_s": 0.01,
         "ownership_safe": True,
         "external_writers": 0,
@@ -340,7 +340,7 @@ def test_safe_return_miss_raises_typed_failure_then_allows_next_success(
     adapter.play_motion("motiondecode:joy")
     assert adapter.wait_for_motion_complete("motiondecode:joy") is True
     assert [request["operation"] for request in channel.requests] == [
-        "status", "status", "execute", "status", "status", "execute"
+        "status", "status", "execute_bound", "status", "status", "execute_bound"
     ]
 
 
@@ -376,7 +376,7 @@ def test_safe_return_miss_status_ipc_failure_remains_hard_failure(
     class StatusFailureChannel(ResultSequenceChannel):
         def request(self, payload):
             if payload["operation"] == "status" and any(
-                    item["operation"] == "execute" for item in self.requests):
+                    item["operation"] == "execute_bound" for item in self.requests):
                 self.requests.append(payload)
                 raise RuntimeError("status IPC failed")
             return super().request(payload)
@@ -411,7 +411,7 @@ def test_real_adapter_allows_joy_only_with_explicit_hackathon_gate(tmp_path: Pat
             self.requests.append(payload)
             if payload["operation"] == "status":
                 return {"accepted": True, "state": "READY", "mode": "real",
-                        "session_id": "test-session"}
+                        "protocol_version": 2, "session_id": "test-session"}
             return {
                 "accepted": True,
                 "state": "READY",
@@ -436,7 +436,7 @@ def test_real_adapter_allows_joy_only_with_explicit_hackathon_gate(tmp_path: Pat
     adapter.play_motion("motiondecode:joy")
     assert adapter.wait_for_motion_complete("motiondecode:joy")
     assert [request["operation"] for request in channel.requests] == [
-        "status", "status", "execute"
+        "status", "status", "execute_bound"
     ]
 
 
