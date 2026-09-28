@@ -145,6 +145,7 @@ class PatrolController:
             self.stop()
             raise TimeoutError("patrol did not confirm pause before timeout")
         status = self.control_status()
+        self._require_stop_confirmation()
         if status["error"] or status["stopped"] or not status["paused"]:
             raise RuntimeError(str(status["error"] or "patrol pause failed"))
         return status
@@ -164,6 +165,10 @@ class PatrolController:
             raise
         with self._motion_lock:
             self._require_control_lease()
+            if (hasattr(self.locomotion, "enable_movement") and
+                    self.locomotion.stop_rpc_status is None):
+                self._send_stop()  # Initial claimed-but-held session needs its first STOP.
+            self._require_stop_confirmation()
             self._enable_relay_movement()
             self._require_control_lease()  # Network enable must not outlive F03.
             self._finish_resume()
@@ -187,6 +192,7 @@ class PatrolController:
         self.state = PatrolState.STOPPED
 
     def verify_reaction_ready(self) -> dict[str, object]:
+        self._require_stop_confirmation()
         with self._control_lock:
             if self._stop.is_set() or self._last_error:
                 raise RuntimeError(self._last_error or "patrol is stopped")
@@ -198,6 +204,7 @@ class PatrolController:
             self._record_failure(exc)
             self.stop()
             raise
+        self._require_stop_confirmation()
         return self.control_status()
 
     def control_status(self) -> dict[str, object]:
@@ -218,6 +225,8 @@ class PatrolController:
                 "turn_progress_rad": self._turn_progress_rad,
                 "turn_remaining_rad": self._turn_remaining_rad,
                 "stop_sent_monotonic": self._last_stop_sent_monotonic,
+                "stop_rpc_status": getattr(self.locomotion, "stop_rpc_status", None),
+                "stop_transaction": getattr(self.locomotion, "stop_transaction", None),
                 "control_fault": self._control_fault,
                 "lease_required": self._lease_id is not None,
                 "lease_active": (self._lease_id is not None
@@ -665,8 +674,21 @@ class PatrolController:
 
     def _send_stop(self) -> None:
         with self._motion_lock:
-            self.locomotion.stop()
-            self._last_stop_sent_monotonic = self.clock()
+            try:
+                self.locomotion.stop()
+                self._require_stop_confirmation()
+                self._last_stop_sent_monotonic = self.clock()
+            except Exception as exc:
+                self._control_fault = self._control_fault or "STOP_UNCONFIRMED"
+                self._record_failure(exc)  # Latch without recursively retrying STOP.
+                raise
+
+    def _require_stop_confirmation(self):
+        # Pure simulation adapters without the RPC interface retain their local tests.
+        # Local IPC consumers separately reject a missing confirmation field.
+        if (hasattr(self.locomotion, "stop_rpc_status") and
+                self.locomotion.stop_rpc_status != "STOP_RPC_CONFIRMED"):
+            raise RuntimeError("STOP_RPC_CONFIRMED required")
 
     def _record_failure(self, exc: BaseException) -> None:
         with self._control_lock:

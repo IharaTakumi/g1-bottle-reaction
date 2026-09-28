@@ -13,9 +13,11 @@ import time
 try:
     from .ownership_lock import acquire_process_lock
     from .locomotion_protocol import RelayOwnership, serve_datagram
+    from .stop_rpc import ResultPreservingClient
 except ImportError:
     from ownership_lock import acquire_process_lock
     from locomotion_protocol import RelayOwnership, serve_datagram
+    from stop_rpc import ResultPreservingClient
 
 
 MAX_VX = 0.30
@@ -29,6 +31,7 @@ class DryRunClient:
 
     def StopMove(self):
         print("[loco-relay] DRY RUN STOP", flush=True)
+        return 0  # Explicit simulation of RPC_OK, no SDK call.
 
 
 def parser():
@@ -52,6 +55,7 @@ def real_runtime(interface, create_loco):
         acquire_process_lock()
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
     from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+    from unitree_sdk2py.rpc.internal import RPC_OK
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
     from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
     ChannelFactoryInitialize(0, interface)
@@ -60,6 +64,7 @@ def real_runtime(interface, create_loco):
         client = LocoClient()
         client.SetTimeout(2.0)
         client.Init()
+        client = ResultPreservingClient(client, RPC_OK)
     imu = {"yaw": None, "received": None, "count": 0, "started": time.monotonic()}
     odom = {"x": None, "y": None, "yaw": None, "received": None,
             "count": 0, "started": time.monotonic()}
@@ -155,8 +160,7 @@ def main(argv=None):
     next_telemetry = time.monotonic()
 
     def stop(reason):
-        ownership.state = "FAULT"
-        client.StopMove()
+        ownership.fault(reason)  # Already-faulted STOP is never retried at exit.
         print(f"[loco-relay] STOP reason={reason}", flush=True)
 
     try:

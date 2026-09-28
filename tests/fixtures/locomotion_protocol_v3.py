@@ -1,4 +1,4 @@
-"""Owned v4 STOP prepare/commit. Confirmation is NOT physical stop."""
+"""Owned v3 STOP transactions. RPC confirmation is NOT physical stop."""
 import json
 import math
 import socket
@@ -10,7 +10,7 @@ try:
 except ImportError:
     from stop_rpc import RPC_SUCCESS
 
-VERSION = 4
+VERSION = 3
 
 
 def identifier(value):
@@ -35,7 +35,6 @@ class RelayOwnership:
         self.error = None
         self.stop_rpc_status = None
         self.raw_rpc_code = None
-        self.stop_transaction = None
 
     def _stop_rpc(self):
         self.stop_rpc_status = "STOP_RELAY_RECEIVED"
@@ -47,7 +46,7 @@ class RelayOwnership:
                 (type(raw) is float and math.isfinite(raw))) else None
             if type(raw) is not int or raw != RPC_SUCCESS:
                 raise RuntimeError("STOP RPC result unconfirmed: " + repr(raw))
-            self.stop_rpc_status = "STOP_RPC_PREPARED"
+            self.stop_rpc_status = "STOP_RPC_CONFIRMED"
         except Exception as exc:
             self.stop_rpc_status = "STOP_UNCONFIRMED"
             self.state = "FAULT"
@@ -57,7 +56,6 @@ class RelayOwnership:
         if self.state == "FAULT":
             return
         self.state = "FAULT"  # Latch before an SDK call that may raise/block.
-        self.stop_transaction = None
         self.generation = str(uuid.uuid4())
         self.error = reason
         self._stop_rpc()
@@ -101,7 +99,7 @@ class RelayOwnership:
                     raise ValueError("stale or invalid sequence")
                 if packet.get("movement_generation") != self.generation:
                     raise ValueError("wrong movement generation")
-                if operation not in {"enable", "hold", "commit_stop", "move"}:
+                if operation not in {"enable", "hold", "move"}:
                     raise ValueError("unknown owned operation")
                 if operation == "enable" and self.state != "MOVEMENT_HELD":
                     raise ValueError("movement already enabled")
@@ -109,17 +107,6 @@ class RelayOwnership:
                     raise ValueError("confirmed STOP required before enable")
                 if operation == "hold" and request_id == self.generation:
                     raise ValueError("HOLD must advance movement generation")
-                if operation == "commit_stop":
-                    record = self.stop_transaction
-                    if (self.state != "MOVEMENT_HELD" or
-                            self.stop_rpc_status != "STOP_RPC_PREPARED" or
-                            record is None or record["committed"] or
-                            packet.get("stop_request_id") != record["stop_request_id"] or
-                            record["relay_epoch"] != self.epoch or
-                            record["owner_session"] != self.session or
-                            record["movement_generation"] != self.generation or
-                            record["rpc_result"] != RPC_SUCCESS):
-                        raise ValueError("STOP commit does not match current prepared HOLD")
                 if operation == "move":
                     if self.state != "MOVEMENT_ENABLED":
                         raise ValueError("movement held")
@@ -139,23 +126,13 @@ class RelayOwnership:
                     self.generation = str(uuid.uuid4())
                     self.state = "MOVEMENT_ENABLED"
                     self.stop_rpc_status = None
-                    self.stop_transaction = None
                     self.last_move = self.clock()  # First Move also has a deadline.
                 elif operation == "hold":
                     self.state = "MOVEMENT_HELD"
                     # Bind the new HOLD generation to the existing transaction UUID.
                     # Client can verify it exactly; no second identity is needed.
                     self.generation = request_id
-                    self.stop_transaction = None
                     self._stop_rpc()
-                    if self.stop_rpc_status == "STOP_RPC_PREPARED":
-                        self.stop_transaction = dict(
-                            stop_request_id=request_id, relay_epoch=self.epoch,
-                            owner_session=self.session, movement_generation=self.generation,
-                            rpc_result=self.raw_rpc_code, committed=False)
-                elif operation == "commit_stop":
-                    self.stop_transaction["committed"] = True
-                    self.stop_rpc_status = "STOP_RPC_CONFIRMED"
                 else:
                     self.last_move = self.clock()
                     try:
@@ -172,9 +149,7 @@ class RelayOwnership:
             self.fault("SDK exception: " + str(exc))
             response["error"] = self.error
         response.update(relay_state=self.state, stop_rpc_status=self.stop_rpc_status,
-                        raw_rpc_code=self.raw_rpc_code,
-                        stop_request_id=(self.stop_transaction["stop_request_id"]
-                                         if self.stop_transaction else None))
+                        raw_rpc_code=self.raw_rpc_code)
         if self.state == "FAULT":
             response["error"] = self.error
         return response

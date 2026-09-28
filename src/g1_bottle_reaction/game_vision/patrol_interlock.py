@@ -22,6 +22,7 @@ class LocalPatrolController:
         self._pause_owned = False
         self._failed = False
         self.last_stop_sent_monotonic: float | None = None
+        self.stop_rpc_status: str | None = None
 
     @property
     def running(self) -> bool:
@@ -37,8 +38,12 @@ class LocalPatrolController:
                 stream.flush()
                 response = json.loads(stream.readline())
         except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+            self._failed = True
+            self.stop_rpc_status = "STOP_UNCONFIRMED"
             raise PatrolInterlockError(str(exc)) from exc
         if not isinstance(response, dict) or response.get("ok") is not True:
+            self._failed = True
+            self.stop_rpc_status = "STOP_UNCONFIRMED"
             detail = response.get("error") if isinstance(response, dict) else response
             raise PatrolInterlockError(str(detail or "Patrol control request failed"))
         return response
@@ -54,10 +59,14 @@ class LocalPatrolController:
             },
             self.pause_timeout + 2.0,
         )
-        if response.get("error") or response.get("stopped") or not response.get("paused"):
+        if (response.get("error") or response.get("stopped") or not response.get("paused")
+                or response.get("stop_rpc_status") != "STOP_RPC_CONFIRMED"):
+            self._failed = True
+            self.stop_rpc_status = "STOP_UNCONFIRMED"
             raise PatrolInterlockError(
-                str(response.get("error") or "Patrol did not confirm PAUSED")
+                str(response.get("error") or "Patrol did not confirm STOP RPC")
             )
+        self.stop_rpc_status = "STOP_RPC_CONFIRMED"
         self._pause_owned = True
         value = response.get("stop_sent_monotonic")
         self.last_stop_sent_monotonic = (
@@ -70,13 +79,16 @@ class LocalPatrolController:
         response = self._request({"operation": "reaction_ready"}, 3.0)
         if (response.get("error") or response.get("stopped")
                 or not response.get("paused")
+                or response.get("stop_rpc_status") != "STOP_RPC_CONFIRMED"
                 or response.get("telemetry_recovering")):
+            self._failed = True
+            self.stop_rpc_status = "STOP_UNCONFIRMED"
             raise PatrolInterlockError(
                 str(response.get("error") or "Patrol telemetry is not reaction-ready")
             )
 
     def start(self) -> None:
-        if self._failed:
+        if self._failed or self.stop_rpc_status != "STOP_RPC_CONFIRMED":
             raise PatrolInterlockError("Patrol resume is inhibited after a fault")
         if not self._pause_owned:
             raise PatrolInterlockError("Reaction does not own a Patrol pause")
@@ -86,6 +98,7 @@ class LocalPatrolController:
                 str(response.get("error") or "Patrol resume was not confirmed")
             )
         self._pause_owned = False
+        self.stop_rpc_status = None
 
     def abort(self, reason: str) -> None:
         self._failed = True

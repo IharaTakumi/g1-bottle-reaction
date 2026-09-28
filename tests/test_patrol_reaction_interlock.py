@@ -100,7 +100,7 @@ def build(events, *, ready=True, safe_return=True):
     return controller, patrol
 
 
-def test_audio_starts_while_patrol_stop_confirmation_is_pending():
+def test_audio_and_motion_wait_for_patrol_stop_confirmation():
     events = []
     settings = FoundSettings(.25, .3, .15, 2, (Path("reaction.wav"),), "mock", 1)
     patrol = BlockingPatrol(events)
@@ -115,10 +115,8 @@ def test_audio_starts_while_patrol_stop_confirmation_is_pending():
     try:
         assert controller.trigger("person", time.monotonic())
         assert patrol.stop_entered.wait(timeout=1)
-        deadline = time.monotonic() + 1
-        while "AUDIO" not in events and time.monotonic() < deadline:
-            time.sleep(.005)
-        assert "AUDIO" in events
+        assert "AUDIO" not in events
+        assert controller._jobs == []
         assert "motiondecode:found" not in events
         patrol.release_stop.set()
         wait_idle(controller)
@@ -152,14 +150,14 @@ def test_patrol_resumes_only_after_motion_audio_and_q0_weight_zero():
         controller.close()
 
 
-def test_stationary_preflight_failure_final_stops_without_reaction_or_audio():
+def test_motion_preflight_failure_final_stops_without_reaction_or_audio():
     events = []
     controller, patrol = build(events, ready=False)
     try:
         assert controller.trigger("person", 1)
         wait_idle(controller)
         assert "motiondecode:found" not in events
-        assert "AUDIO" in events
+        assert "AUDIO" not in events
         assert patrol.aborted
         assert not patrol.running
     finally:

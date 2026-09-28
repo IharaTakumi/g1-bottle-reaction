@@ -121,8 +121,10 @@ def test_ipc_stop_failure_still_closes_socket_joins_and_unlinks(tmp_path):
     assert not thread.is_alive()
     assert not server.path.exists()
     assert controller.control_status()["stopped"]
-    assert controller.control_status()["control_fault"] is None
-    assert not controller._send_move(.3, 0)
+    assert controller.control_status()["control_fault"] == "STOP_UNCONFIRMED"
+    with pytest.raises(RuntimeError, match="STOP_UNCONFIRMED"):
+        controller._send_move(.3, 0)
+    loco.stop.assert_called_once()
 
 
 @pytest.mark.parametrize("failures", [[], ["ipc"], ["ipc", "loco", "source"]])

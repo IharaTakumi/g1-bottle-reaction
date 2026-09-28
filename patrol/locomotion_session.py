@@ -22,6 +22,8 @@ class RelaySession:
         self.epoch = self.session = self.generation = None
         self.sequence = -1
         self.enabled = False
+        self.stop_rpc_status = None
+        self.stop_transaction = None
         try:
             self.sock.connect((host, port))  # Kernel filters response source endpoint.
             reply = self._exchange("discover")
@@ -45,7 +47,7 @@ class RelaySession:
 
     def _exchange(self, operation, **fields):
         request_id = str(uuid.uuid4())
-        packet = {"protocol_version": 2, "operation": operation,
+        packet = {"protocol_version": 4, "operation": operation,
                   "request_id": request_id, **fields}
         if self.epoch is not None:
             packet["relay_epoch"] = self.epoch
@@ -54,6 +56,8 @@ class RelaySession:
             packet.update(owner_session=self.session, sequence=self.sequence,
                           movement_generation=self.generation)
         try:
+            if operation == "hold":
+                self.stop_transaction = dict(packet)
             deadline = time.monotonic() + self.timeout
             self.sock.settimeout(self.timeout)
             self.sock.send(json.dumps(packet, allow_nan=False).encode())
@@ -68,26 +72,43 @@ class RelaySession:
                 if reply.get("request_id") != request_id:
                     continue  # A delayed unrelated reply cannot extend the deadline.
                 if (type(reply.get("protocol_version")) is not int or
-                        reply["protocol_version"] != 2 or reply.get("accepted") is not True):
+                        reply["protocol_version"] != 4 or reply.get("accepted") is not True or
+                        reply.get("operation") != operation):
                     raise RuntimeError(str(reply.get("error") or "relay rejected protected protocol"))
                 if self.epoch is not None and reply.get("relay_epoch") != self.epoch:
                     raise RuntimeError("relay epoch changed")
                 if self.session is not None:
-                    expected = "MOVEMENT_HELD" if operation == "hold" else "MOVEMENT_ENABLED"
+                    expected = ("MOVEMENT_HELD" if operation in {"hold", "commit_stop"}
+                                else "MOVEMENT_ENABLED")
                     if (reply.get("owner_session") != self.session or
                             type(reply.get("sequence")) is not int or
                             reply["sequence"] != self.sequence or reply.get("state") != expected):
                         raise RuntimeError("invalid owned relay response")
                     generation = self._id(reply, "movement_generation")
-                    if operation == "move" and generation != self.generation:
+                    if operation in {"move", "commit_stop"} and generation != self.generation:
                         raise RuntimeError("movement generation changed")
                     if operation in {"enable", "hold"} and generation == self.generation:
                         raise RuntimeError("movement generation was not advanced")
+                    if operation in {"hold", "commit_stop"}:
+                        stop_id = request_id if operation == "hold" else fields["stop_request_id"]
+                        expected_status = ("STOP_RPC_PREPARED" if operation == "hold"
+                                           else "STOP_RPC_CONFIRMED")
+                        if (generation != stop_id or reply.get("stop_request_id") != stop_id or
+                                reply.get("relay_state") != "MOVEMENT_HELD" or
+                                reply.get("stop_rpc_status") != expected_status or
+                                type(reply.get("raw_rpc_code")) is not int or
+                                reply["raw_rpc_code"] != 0):
+                            raise RuntimeError("STOP RPC confirmation invalid")
+                        self.stop_transaction = dict(reply)
                     self.generation = generation
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("relay response deadline exceeded")
                 return reply
         except BaseException:
             self.failed = True
             self.enabled = False
+            if operation in {"hold", "commit_stop"}:
+                self.stop_rpc_status = "STOP_UNCONFIRMED"
             raise
 
     def enable(self):
@@ -95,8 +116,11 @@ class RelaySession:
             if self.failed:
                 raise RuntimeError("relay session failure latched")
             if not self.enabled:
+                if self.stop_rpc_status != "STOP_RPC_CONFIRMED":
+                    raise RuntimeError("confirmed STOP required before enable")
                 self._exchange("enable")
                 self.enabled = True
+                self.stop_rpc_status = None
 
     def move(self, vx, vyaw):
         with self.lock:
@@ -107,8 +131,14 @@ class RelaySession:
     def hold(self):
         with self.lock:
             self.enabled = False
-            # A failed session may still attempt HOLD, but never enables again.
-            self._exchange("hold")
+            if self.stop_rpc_status == "STOP_UNCONFIRMED":
+                raise RuntimeError("STOP_UNCONFIRMED latched; restart required")
+            # A prior Move failure may attempt one HOLD. A failed HOLD is never retried.
+            self.stop_rpc_status = "STOP_REQUESTED"
+            prepared = self._exchange("hold")
+            self.stop_rpc_status = "STOP_RPC_PREPARED"
+            self._exchange("commit_stop", stop_request_id=prepared["request_id"])
+            self.stop_rpc_status = "STOP_RPC_CONFIRMED"
 
     def close(self):
         self.sock.close()

@@ -364,7 +364,7 @@ class FoundReactionController:
                         flush=True,
                     )
                 except Exception as exc:
-                    print(f"WANDER RESUME FAILED: {exc}; robot remains stopped", flush=True)
+                    print(f"WANDER RESUME FAILED: {exc}; resume inhibited; physical stationary unverified", flush=True)
                 return True
         decision = self.engine.handle(
             FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
@@ -398,9 +398,26 @@ class FoundReactionController:
     def _trigger_patrol(self, name: str, now: float) -> bool:
         with self._timing_lock:
             self._reaction_timing = {"target": name, "t0": float(now)}
+        # Prepare outside the Vision loop and before creating any audio/motion job.
+        self._completion_thread = threading.Thread(
+            target=self._prepare_patrol_reaction, args=(name, now),
+            name="patrol-reaction-confirmation", daemon=True,
+        )
+        self._completion_thread.start()
+        return True
+
+    def _prepare_patrol_reaction(self, name: str, now: float) -> None:
+        try:
+            self._patrol_motion_gate(name)
+        except Exception as exc:
+            print(f"{name.upper()} REACTION INHIBITED: {exc}", flush=True)
+            self._report_reaction_timing()
+            return
+        if self._closing.is_set():
+            return
         self.speech.set_start_callback(self._record_audio_start)
         self.robot.set_motion_gate(
-            lambda: self._patrol_motion_gate(name), self._record_motion_start
+            self.patrol.wait_reaction_ready, self._record_motion_start
         )
         decision = self.engine.handle(
             FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
@@ -410,22 +427,16 @@ class FoundReactionController:
             self.robot.clear_motion_gate()
             with self._timing_lock:
                 self._reaction_timing = None
-            return False
+            self.patrol.abort("Reaction rejected after confirmed STOP")
+            return
         self._jobs.append(decision.job)
         print(
-            f"{name.upper()} REACTION EVENT: immediate audio + "
-            f"stop-gated motion={decision.reaction.motion}; "
+            f"{name.upper()} REACTION EVENT: RPC-confirmed audio + "
+            f"motion={decision.reaction.motion}; "
             f"confirmed_monotonic={now:.6f}",
             flush=True,
         )
-        self._completion_thread = threading.Thread(
-            target=self._resume_after_completion,
-            args=(name, decision.job),
-            name="patrol-reaction-completion",
-            daemon=True,
-        )
-        self._completion_thread.start()
-        return True
+        self._resume_after_completion(name, decision.job)
 
     def _patrol_motion_gate(self, name: str) -> None:
         try:
@@ -445,12 +456,12 @@ class FoundReactionController:
                     self.robot.last_preflight_error or "safety preflight failed"
                 )
             self.patrol.wait_reaction_ready()
-            stationary = time.monotonic()
+            ready = time.monotonic()
             with self._timing_lock:
                 if self._reaction_timing is not None:
-                    self._reaction_timing["t3"] = stationary
+                    self._reaction_timing["t3"] = ready
             print(
-                f"{name.upper()} ARMS STATIONARY: monotonic={stationary:.6f}",
+                f"{name.upper()} REACTION PREFLIGHT CONFIRMED: monotonic={ready:.6f}",
                 flush=True,
             )
         except Exception as exc:
@@ -491,14 +502,14 @@ class FoundReactionController:
             "target": timing.get("target"),
             "T0_detection_confirmed": t0,
             "T1_audio_start": t1,
-            "T2_locomotion_stop_sent": t2,
-            "T3_arms_stationary": t3,
+            "T2_stop_rpc_confirmed": t2,
+            "T3_reaction_preflight_confirmed": t3,
             "T4_motiondecode_trigger": t4,
             "T5_visible_motion_start": t5,
             "detection_to_audio_s": delta(t1),
             "detection_to_stop_s": delta(t2),
-            "stop_to_stationary_s": delta(t3, t2) if t2 is not None else None,
-            "stationary_to_motiondecode_trigger_s": (
+            "stop_to_preflight_s": delta(t3, t2) if t2 is not None else None,
+            "preflight_to_motiondecode_trigger_s": (
                 delta(t4, t3) if t3 is not None else None
             ),
             "detection_to_motiondecode_trigger_s": delta(t4),
@@ -527,7 +538,7 @@ class FoundReactionController:
         if not successful:
             print(
                 f"{name.upper()} REACTION FAILED/UNCERTAIN: "
-                f"{self.interlock_label} remains stopped",
+                f"{self.interlock_label} resume inhibited; physical stationary unverified",
                 flush=True,
             )
             if self.patrol is not None:
@@ -550,7 +561,7 @@ class FoundReactionController:
         except Exception as exc:
             print(
                 f"{self.interlock_label.upper()} RESUME FAILED: {exc}; "
-                "robot remains stopped",
+                "resume inhibited; physical stationary unverified",
                 flush=True,
             )
             if self.patrol is not None:

@@ -26,7 +26,7 @@ physical lifetime and safe transfer remain F04 work.
 
 ## Relay protocol
 
-Protocol v2 uses `operation`, `sequence`, and nested `velocity`. It never sends
+Protocol v4 (F04-A) uses `operation`, `sequence`, and nested `velocity`. It never sends
 legacy top-level `seq`/`vx`/`vy`/`vyaw` packets. An old relay cannot decode these
 as Move. There is no fallback or retry after handshake failure.
 
@@ -37,16 +37,17 @@ is rejected, including one from the same endpoint. Lost claim responses require
 relay restart; they do not justify takeover.
 
 Owned operations require the exact epoch, session, source, increasing sequence,
-and movement generation. Rejected packets do not update sequence/freshness.
+and movement generation. Validation-rejected packets do not update sequence/freshness.
 The watchdog still runs independently of packet acceptance, including under
 invalid traffic. Session identifiers prevent accidental stale senders/replays;
 they are not a replacement for network authentication against hostile spoofing.
 
-`enable` changes generation and enables movement. `hold` changes generation and
+`enable` requires a committed STOP, changes generation and enables movement. `hold` changes generation and
 disables movement BEFORE attempting StopMove, retaining the owner. A delayed old
 Move cannot pass either while held or after a later enable. Valid Move responses
-mean protocol acceptance only. HOLD responses are NOT RPC-success or stationary
-acknowledgements; SDK return interpretation is deliberately unchanged.
+mean protocol acceptance only. HOLD responses carry prepared RPC results;
+`commit_stop` binds the transaction to the still-held relay session before confirmation.
+they are NOT physical stationary acknowledgements. See STOP_TRANSACTIONS.md.
 
 The existing 0.40-second Move watchdog starts on enable and refreshes only on
 accepted Move. Expiry latches FAULT before attempting STOP. Later Move, enable,
@@ -68,7 +69,7 @@ and dry-run paths remain independent. A protocol failure latches the client;
 subsequent movement cannot automatically re-claim or re-enable.
 
 Deploy relay and client together. Standalone relay copies must include sibling
-`ownership_lock.py` and `locomotion_protocol.py`; the client also needs
+`ownership_lock.py`, `stop_rpc.py` and `locomotion_protocol.py`; the client also needs
 `locomotion_session.py` and `ownership.yaml`. Missing modules or old protocol
 fail closed. Do not deploy or launch on hardware as part of offline validation.
 
@@ -78,5 +79,6 @@ Reactive Wander and forward-distance utilities exist only on the older Wander
 branches, not this base. They, old relay copies/checkouts, unknown DDS clients,
 Unitree services and manual controllers remain outside this cooperative lock.
 Phase 1B must migrate the actual deployed Wander writers in a separate review.
-F05 overall remains PARTIAL. F04 stationary detection and RPC-result confirmation
-are not implemented here.
+F05 is closed only for the defined active-writer Level-2 source scope when paired
+with the reviewed Phase 1B Wander deployment; deployment verification is pending.
+F04-A RPC confirmation is implemented; F04 physical stationary remains open.

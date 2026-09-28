@@ -35,6 +35,7 @@ class FakeSdk:
 
     def StopMove(self):
         self.stops += 1
+        return 0
 
 
 class LocalRelay:
@@ -85,7 +86,7 @@ class Sender:
 
     def packet(self, operation, **kw):
         self.seq += 1
-        return dict(protocol_version=2, request_id=str(uuid.uuid4()), operation=operation,
+        return dict(protocol_version=4, request_id=str(uuid.uuid4()), operation=operation,
                     relay_epoch=self.epoch, owner_session=self.session,
                     movement_generation=self.generation, sequence=self.seq, **kw)
 
@@ -98,6 +99,8 @@ class Sender:
         if reply["accepted"]:
             self.session = reply.get("owner_session", self.session)
             self.generation = reply.get("movement_generation", self.generation)
+            if operation == "hold":
+                return self.command("commit_stop", stop_request_id=reply["stop_request_id"])
         return reply
 
     def claim(self):
@@ -133,6 +136,7 @@ def test_claim_is_held_second_sender_and_larger_sequence_rejected(relay, sender)
     b = Sender(relay)
     try:
         assert not b.claim()["accepted"]
+        assert sender.command("hold")["accepted"]
         assert sender.command("enable")["accepted"]
         packet = sender.packet("move", velocity=VELOCITY)
         packet["sequence"] = 999999
@@ -150,6 +154,7 @@ def test_claim_is_held_second_sender_and_larger_sequence_rejected(relay, sender)
     ("movement_generation", str(uuid.uuid4())),
 ])
 def test_reject_does_not_refresh_or_advance(relay, sender, field, value):
+    assert sender.command("hold")["accepted"]
     assert sender.command("enable")["accepted"]
     before = (relay.owner.sequence, relay.owner.last_move, relay.owner.generation)
     packet = sender.packet("move", velocity=VELOCITY)
@@ -160,6 +165,7 @@ def test_reject_does_not_refresh_or_advance(relay, sender, field, value):
 
 
 def test_replay_and_legacy_have_zero_additional_moves(relay, sender):
+    assert sender.command("hold")["accepted"]
     assert sender.command("enable")["accepted"]
     packet = sender.packet("move", velocity=VELOCITY)
     assert sender.send(packet)["accepted"]
@@ -171,15 +177,17 @@ def test_replay_and_legacy_have_zero_additional_moves(relay, sender):
 
 
 def test_hold_blocks_delayed_move_before_and_after_explicit_resume(relay, sender):
+    assert sender.command("hold")["accepted"]
     assert sender.command("enable")["accepted"]
     assert sender.command("move", velocity=VELOCITY)["accepted"]
     old = sender.packet("move", velocity=VELOCITY)
     old["sequence"] = 1000  # Reject by generation, not just ordering.
     session = sender.session
     assert sender.command("hold")["accepted"]
-    assert relay.sdk.stops == 1
+    assert relay.sdk.stops == 2
     assert not sender.send(old)["accepted"]
     assert sender.session == session
+    assert sender.command("hold")["accepted"]
     assert sender.command("enable")["accepted"]
     assert not sender.send(old)["accepted"]
     assert sender.command("move", velocity=VELOCITY)["accepted"]
@@ -187,6 +195,7 @@ def test_hold_blocks_delayed_move_before_and_after_explicit_resume(relay, sender
 
 
 def test_watchdog_fault_cannot_be_renewed_or_taken_over(relay, sender):
+    assert sender.command("hold")["accepted"]
     assert sender.command("enable")["accepted"]
     assert sender.command("move", velocity=VELOCITY)["accepted"]
     until = time.monotonic() + 2
@@ -203,6 +212,7 @@ def test_watchdog_fault_cannot_be_renewed_or_taken_over(relay, sender):
 
 
 def test_relay_restart_rejects_old_session_and_new_claim_has_fresh_sequence(relay, sender):
+    assert sender.command("hold")["accepted"]
     assert sender.command("enable")["accepted"]
     old = sender.packet("move", velocity=VELOCITY)
     restarted = LocalRelay()
@@ -213,6 +223,7 @@ def test_relay_restart_rejects_old_session_and_new_claim_has_fresh_sequence(rela
         assert restarted.sdk.moves == []
         assert b.claim()["accepted"]
         assert b.session != sender.session
+        assert b.command("hold")["accepted"]
         assert b.command("enable")["accepted"]
         assert b.command("move", velocity=VELOCITY)["accepted"]
     finally:
@@ -235,13 +246,15 @@ def test_production_client_envelopes_are_downgrade_safe(relay):
         return handle(packet, peer)
     relay.owner.handle = record
     client = RelaySession(*relay.address)
+    client.hold()
     try:
         client.enable()
         client.move(.1, 0)
         client.hold()
     finally:
         client.close()
-    assert [p["operation"] for p in seen] == ["discover", "claim", "enable", "move", "hold"]
+    assert [p["operation"] for p in seen] == [
+        "discover", "claim", "hold", "commit_stop", "enable", "move", "hold", "commit_stop"]
     for packet in seen:
         with pytest.raises((ValueError, KeyError)):
             locomotion_relay.decode(json.dumps(packet).encode(), False)
@@ -250,6 +263,7 @@ def test_production_client_envelopes_are_downgrade_safe(relay):
 @pytest.mark.parametrize("mode", ["missing_generation", "wrong_epoch", "malformed", "timeout"])
 def test_enable_response_failure_latches_client_without_any_move(relay, mode):
     client = RelaySession(*relay.address)
+    client.hold()
     handle = relay.owner.handle
     def broken_reply(packet, peer):
         reply = handle(packet, peer)
@@ -331,7 +345,7 @@ def test_client_handshake_failure_never_sends_legacy_or_move(mode):
                 seen.append(packet)
                 if mode == "silence":
                     continue
-                reply = dict(protocol_version=2, accepted=True, request_id=packet["request_id"],
+                reply = dict(protocol_version=4, accepted=True, request_id=packet["request_id"], operation=packet["operation"],
                              relay_epoch=str(uuid.uuid4()), state="MOVEMENT_HELD")
                 if mode == "legacy":
                     reply["protocol_version"] = 1
@@ -354,6 +368,7 @@ def test_client_handshake_failure_never_sends_legacy_or_move(mode):
 
 
 def test_sdk_exception_latches_before_further_move(relay, sender):
+    assert sender.command("hold")["accepted"]
     assert sender.command("enable")["accepted"]
     relay.sdk.StopMove = Mock(side_effect=ValueError("fake STOP failure"))
     assert not sender.command("hold")["accepted"]
@@ -425,7 +440,7 @@ sys.path.insert(0,sys.argv[1])
 from patrol.locomotion_session import RelaySession
 s=RelaySession('127.0.0.1',int(sys.argv[2]))
 if sys.argv[3]=='moving':
-    s.enable(); s.move(.1,0)
+    s.hold(); s.enable(); s.move(.1,0)
 print('READY',flush=True)
 while True:
     if sys.argv[3]=='moving': s.move(.1,0)

@@ -80,8 +80,16 @@ class UdpLocomotionAdapter:
         self._session.move(vx, vyaw)
 
     def stop(self) -> None:
-        # Protocol HOLD acceptance only; not a physical STOP acknowledgement.
+        # Correlated RPC confirmation only; never physical stationary.
         self._session.hold()
+
+    @property
+    def stop_rpc_status(self):
+        return self._session.stop_rpc_status
+
+    @property
+    def stop_transaction(self):
+        return self._session.stop_transaction
 
     def close(self) -> None:
         if self._closed:
@@ -97,12 +105,14 @@ class UdpLocomotionAdapter:
 
 class DryRunLocomotionAdapter:
     def __init__(self):
+        self.stop_rpc_status = "STOP_RPC_CONFIRMED"  # Simulation only; no RPC exists.
         self.commands: list[tuple[str, float, float]] = []
         self._yaw = 0.0
         self._x = 0.0
         self._y = 0.0
 
     def move(self, vx: float, vyaw: float = 0.0) -> None:
+        self.stop_rpc_status = None
         self.commands.append(("move", vx, vyaw))
         self._yaw += vyaw * 0.10
         self._x += vx * 0.10 * math.cos(self._yaw)
@@ -119,6 +129,7 @@ class DryRunLocomotionAdapter:
 
     def stop(self) -> None:
         self.commands.append(("stop", 0.0, 0.0))
+        self.stop_rpc_status = "STOP_RPC_CONFIRMED"  # Simulated RPC result.
 
     def close(self) -> None:
         self.stop()
