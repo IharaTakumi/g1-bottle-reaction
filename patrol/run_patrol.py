@@ -21,6 +21,8 @@ from lidar_guard import GuardState, LidarGuard
 from locomotion_adapter import DryRunLocomotionAdapter, UdpLocomotionAdapter
 from patrol_controller import PatrolConfig, PatrolController
 from control_ipc import PatrolControlServer
+from control_lease import load_control_timing
+from cleanup import run_cleanup
 from udp_relay_guard import UdpRelayGuard
 
 CLOUD_TOPIC = "rt/utlidar/cloud_livox_mid360"
@@ -55,6 +57,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--operator-approved-turn-only", action="store_true")
     value.add_argument("--control-socket")
     value.add_argument("--start-paused", action="store_true")
+    value.add_argument("--require-control-lease", action="store_true")
+    value.add_argument("--control-lease-id")
     return value
 
 
@@ -224,6 +228,13 @@ def observe_lidar(args):
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     config(args)
+    if args.require_control_lease:
+        if (args.mode != "real" or not args.control_socket
+                or not args.control_lease_id or not args.control_lease_id.strip()):
+            raise ValueError("--require-control-lease requires real mode, control socket and lease ID")
+    elif args.control_lease_id is not None:
+        raise ValueError("--control-lease-id requires --require-control-lease")
+    timing = load_control_timing() if args.require_control_lease else None
     if args.mode == "dry-run":
         return dry_run(args)
     if args.start_paused and not args.control_socket:
@@ -248,7 +259,11 @@ def main(argv=None) -> int:
     loco = UdpLocomotionAdapter(args.locomotion_relay_host, args.locomotion_relay_port)
     control = None
     try:
-        controller = PatrolController(loco, guard, config(args))
+        controller = PatrolController(
+            loco, guard, config(args),
+            lease_id=args.control_lease_id,
+            lease_timeout_s=timing.lease_timeout_s if timing else None,
+        )
         if args.start_paused:
             controller.pause()
         if args.control_socket:
@@ -260,10 +275,11 @@ def main(argv=None) -> int:
         else:
             controller.run(cycles=args.loops)
     finally:
-        if control is not None:
-            control.close()
-        loco.close()
-        source.close()
+        run_cleanup([
+            ("Patrol control close", lambda: control.close() if control else None),
+            ("Locomotion close", loco.close),
+            ("LiDAR source close", source.close),
+        ])
     return 0
 
 

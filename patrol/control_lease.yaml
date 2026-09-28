@@ -1,0 +1,7 @@
+# Three heartbeat opportunities per lease, with one command-period of jitter.
+# Expiry is checked at each 0.10 s command and before every Move/Turn.
+# This does not change the independent relay watchdog (0.40 s).
+heartbeat_interval_s: 0.10
+lease_timeout_s: 0.30
+# Absolute per-connection deadline, including slow trickle clients.
+ipc_read_timeout_s: 0.20

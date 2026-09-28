@@ -52,7 +52,13 @@ class PatrolConfig:
 
 class PatrolController:
     def __init__(self, locomotion, guard, config: PatrolConfig | None = None,
-                 clock=time.monotonic, sleep=time.sleep, emit=print):
+                 clock=time.monotonic, sleep=time.sleep, emit=print,
+                 *, lease_id: str | None = None, lease_timeout_s: float | None = None):
+        if lease_id is not None and (not isinstance(lease_id, str) or not lease_id.strip()):
+            raise ValueError("lease_id must be a nonempty string")
+        if lease_id is not None and (lease_timeout_s is None
+                or not math.isfinite(lease_timeout_s) or not 0 < lease_timeout_s <= .40):
+            raise ValueError("lease timeout must be in (0, 0.40] seconds")
         self.locomotion = locomotion
         self.guard = guard
         self.config = config or PatrolConfig()
@@ -63,7 +69,7 @@ class PatrolController:
         self._pause_acknowledged = threading.Event()
         self._stop = threading.Event()
         self._recovering_telemetry = threading.Event()
-        self._motion_lock = threading.Lock()
+        self._motion_lock = threading.RLock()
         self._control_lock = threading.Lock()
         self._pause_reason: str | None = None
         self._active_state = PatrolState.STOPPED
@@ -73,6 +79,52 @@ class PatrolController:
         self._turn_progress_rad: float | None = None
         self._turn_remaining_rad: float | None = None
         self._last_stop_sent_monotonic: float | None = None
+        # All lease state and Move/STOP serialization use the motion lock.
+        self._lease_id = lease_id
+        self._lease_timeout_s = lease_timeout_s
+        self._last_heartbeat: float | None = None
+        self._control_fault: str | None = None
+        if lease_id is not None:
+            self._paused.set()
+            self._pause_requested.set()
+            self._pause_acknowledged.set()
+            self._pause_reason = "waiting for supervisor lease"
+            self.state = PatrolState.PAUSED
+
+    def control_fault(self, reason: str) -> None:
+        with self._motion_lock:
+            if self._control_fault is not None:
+                return
+            self._control_fault = reason
+            self._record_failure(RuntimeError(reason))
+            # Latch before requesting STOP, including if the adapter raises.
+            self.stop()
+
+    def check_control_lease(self) -> bool:
+        with self._motion_lock:
+            if (self._lease_id is not None and self._last_heartbeat is not None
+                    and self.clock() - self._last_heartbeat >= self._lease_timeout_s):
+                self.control_fault("control lease expired")
+            if self._control_fault is not None:
+                raise RuntimeError(self._control_fault)
+            return self._lease_id is None or self._last_heartbeat is not None
+
+    def heartbeat(self, lease_id: object) -> dict[str, object]:
+        with self._motion_lock:
+            received = self.clock()
+            self.check_control_lease()  # Never renew an already expired lease.
+            if self._stop.is_set():
+                raise RuntimeError("patrol is stopped")
+            if self._lease_id is None or lease_id != self._lease_id:
+                raise ValueError("wrong control lease ID")
+            # Scheduling delay after validation must not turn an old heartbeat
+            # into a fresh one. Age the lease from this handler's entry time.
+            self._last_heartbeat = received
+            return self.control_status()
+
+    def _require_control_lease(self) -> None:
+        if not self.check_control_lease():
+            raise RuntimeError("no active supervisor lease")
 
     def pause(self) -> None:
         self._pause_requested.set()
@@ -98,6 +150,7 @@ class PatrolController:
         return status
 
     def resume(self) -> None:
+        self._require_control_lease()
         with self._control_lock:
             if self._stop.is_set() or self._last_error:
                 raise RuntimeError(self._last_error or "patrol is stopped")
@@ -109,6 +162,11 @@ class PatrolController:
             self._record_failure(exc)
             self.stop()
             raise
+        with self._motion_lock:
+            self._require_control_lease()
+            self._finish_resume()
+
+    def _finish_resume(self) -> None:
         with self._control_lock:
             if self._stop.is_set() or self._last_error:
                 raise RuntimeError(self._last_error or "patrol is stopped")
@@ -141,7 +199,7 @@ class PatrolController:
         return self.control_status()
 
     def control_status(self) -> dict[str, object]:
-        with self._control_lock:
+        with self._motion_lock, self._control_lock:
             return {
                 "state": self.state.value,
                 "phase": self._active_state.value,
@@ -158,6 +216,13 @@ class PatrolController:
                 "turn_progress_rad": self._turn_progress_rad,
                 "turn_remaining_rad": self._turn_remaining_rad,
                 "stop_sent_monotonic": self._last_stop_sent_monotonic,
+                "control_fault": self._control_fault,
+                "lease_required": self._lease_id is not None,
+                "lease_active": (self._lease_id is not None
+                                 and self._last_heartbeat is not None
+                                 and self._control_fault is None
+                                 and not self._stop.is_set()
+                                 and self.clock() - self._last_heartbeat < self._lease_timeout_s),
             }
 
     def run(self, cycles: int | None = 1) -> None:
@@ -230,6 +295,7 @@ class PatrolController:
         self.emit(f"[patrol] {state.value} target={target:.3f}m odom closed-loop "
                   f"heading_target={math.degrees(target_yaw):.1f}deg")
         while True:
+            self.check_control_lease()
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped")
             sample = self._require_odom()
@@ -311,6 +377,7 @@ class PatrolController:
         deadline = self.clock() + 2.0
         sample = None
         while self.clock() < deadline:
+            self.check_control_lease()
             sample = self.locomotion.odom_sample()
             if self._odom_is_fresh(sample):
                 return sample
@@ -336,6 +403,7 @@ class PatrolController:
         moving = False
         self.emit(f"[patrol] {state.value} target={target:.3f}rad IMU closed-loop")
         while direction * accumulated < self.config.turn_stop_at_rad:
+            self.check_control_lease()
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped")
             sample = self._require_imu()
@@ -395,6 +463,7 @@ class PatrolController:
         deadline = self.clock() + 2.0
         sample = None
         while self.clock() < deadline:
+            self.check_control_lease()
             sample = self.locomotion.imu_sample()
             if self._imu_is_fresh(sample):
                 return sample
@@ -470,6 +539,7 @@ class PatrolController:
         try:
             deadline = started + TRANSPORT_RECOVERY_S
             while self.clock() < deadline:
+                self.check_control_lease()
                 if self._stop.is_set():
                     raise RuntimeError("patrol stopped during telemetry recovery")
                 latest = get_sample()
@@ -528,6 +598,7 @@ class PatrolController:
         deadline = self.clock() + 2.0
         imu = odom = None
         while self.clock() < deadline:
+            self.check_control_lease()
             imu = self.locomotion.imu_sample()
             odom = self.locomotion.odom_sample()
             if self._imu_is_fresh(imu) and self._odom_is_fresh(odom):
@@ -557,6 +628,7 @@ class PatrolController:
         if self._pause_requested.is_set() and not self._paused.is_set():
             self._activate_pause(self._pause_reason or "reaction")
         while self._paused.is_set():
+            self.check_control_lease()
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped")
             self._require_odom()
@@ -568,6 +640,8 @@ class PatrolController:
 
     def _send_move(self, vx: float, vyaw: float) -> bool:
         with self._motion_lock:
+            if not self.check_control_lease():
+                return False
             if (self._paused.is_set() or self._stop.is_set()
                     or self._recovering_telemetry.is_set()):
                 return False
@@ -592,6 +666,7 @@ class PatrolController:
         was_moving = False
         self.emit(f"[patrol] {state.value} target={target:.3f}{unit} vx={vx:+.2f} vyaw={vyaw:+.2f}")
         while progress < target:
+            self.check_control_lease()
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped")
             now = self.clock()
@@ -604,8 +679,7 @@ class PatrolController:
                 if not was_moving:
                     self.emit(f"[guard] CLEAR -> RESUME remaining={max(0.0, target-progress):.3f}{unit}")
                 self.state = state
-                self.locomotion.move(vx, vyaw)
-                was_moving = True
+                was_moving = self._send_move(vx, vyaw)
             else:
                 if was_moving:
                     self.locomotion.stop()
