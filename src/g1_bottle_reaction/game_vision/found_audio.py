@@ -521,7 +521,7 @@ class FoundReactionController:
     def _resume_after_completion(self, name: str, job: ReactionJob) -> None:
         if not job.wait(self.reaction_completion_timeout):
             print(
-                f"{name.upper()} REACTION TIMEOUT: {self.interlock_label} remains stopped",
+                f"{name.upper()} REACTION TIMEOUT: {self.interlock_label} resume inhibited; physical stationary unverified",
                 flush=True,
             )
             if self.patrol is not None:
