@@ -14,10 +14,12 @@ try:
     from .ownership_lock import acquire_process_lock
     from .locomotion_protocol import RelayOwnership, serve_datagram
     from .stop_rpc import ResultPreservingClient
+    from .telemetry_evidence import lowstate_evidence, odom_evidence
 except ImportError:
     from ownership_lock import acquire_process_lock
     from locomotion_protocol import RelayOwnership, serve_datagram
     from stop_rpc import ResultPreservingClient
+    from telemetry_evidence import lowstate_evidence, odom_evidence
 
 
 MAX_VX = 0.30
@@ -73,6 +75,7 @@ def real_runtime(interface, create_loco):
         yaw = float(sample.imu_state.rpy[2])
         with lock:
             imu.update(yaw=yaw, received=time.monotonic(), count=imu["count"] + 1)
+            imu.update(lowstate_evidence(sample))
     subscriber = ChannelSubscriber("rt/lowstate", LowState_)
     subscriber.Init(lowstate, 10)
     def mapping_odom(sample):
@@ -83,6 +86,7 @@ def real_runtime(interface, create_loco):
         with lock:
             odom.update(x=float(pose.position.x), y=float(pose.position.y), yaw=float(yaw),
                         received=time.monotonic(), count=odom["count"] + 1)
+            odom.update(odom_evidence(sample))
     odom_subscriber = ChannelSubscriber("rt/unitree/slam_mapping/odom", Odometry_)
     odom_subscriber.Init(mapping_odom, 10)
     return client, (subscriber, odom_subscriber), imu, odom, lock
@@ -190,6 +194,15 @@ def main(argv=None):
                     "odom_age": odom_age,
                     "odom_rate_hz": odom_sample["count"] / odom_elapsed,
                     "timestamp": time.time(),
+                    "imu_gyro": sample.get("imu_gyro"), "imu_tick": sample.get("imu_tick"),
+                    "odom_stamp_ns": odom_sample.get("odom_stamp_ns"),
+                    "imu_received_monotonic": received,
+                    "odom_received_monotonic": odom_received,
+                    "relay_epoch": ownership.epoch, "owner_session": ownership.session,
+                    "movement_generation": ownership.generation,
+                    "relay_state": ownership.state, "stop_rpc_status": ownership.stop_rpc_status,
+                    "stop_request_id": (ownership.stop_transaction["stop_request_id"]
+                                        if ownership.stop_transaction else None),
                 }, separators=(",", ":")).encode(),
                     (args.telemetry_host, args.telemetry_port))
                 next_telemetry = now + 0.02
