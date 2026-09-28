@@ -27,6 +27,7 @@ class RemoteWanderController:
     PID_FILE = "/tmp/g1-mapless-wander.pid"
     LOG_FILE = "/tmp/g1-mapless-wander.log"
     SCRIPT_MARKER = "scripts/g1-wander-reactive-mvp.py"
+    OWNERSHIP_CONTRACT = "--require-locomotion-ownership-v1"
 
     def __init__(
         self,
@@ -97,17 +98,22 @@ class RemoteWanderController:
         log_file = shlex.quote(self.LOG_FILE)
         python = shlex.quote(str(PurePosixPath(self.remote_dir) / ".venv-wander/bin/python"))
         script = shlex.quote(str(PurePosixPath(self.remote_dir) / self.SCRIPT_MARKER))
+        ownership = shlex.quote(self.OWNERSHIP_CONTRACT)
         command = (
             f"{self._process_helpers()} "
             f"pid_file={pid_file}; "
             "if [ -f \"$pid_file\" ]; then "
             "IFS= read -r old_pid < \"$pid_file\" || old_pid=; "
             "if kill -0 \"$old_pid\" 2>/dev/null && is_wander \"$old_pid\"; then "
-            "echo RUNNING; exit 0; fi; rm -f -- \"$pid_file\"; fi; "
+            f"if tr '\\0' '\\n' < \"/proc/$old_pid/cmdline\" | grep -Fx -- {ownership} >/dev/null; then "
+            "echo RUNNING; exit 0; fi; "
+            "echo 'Existing Wander lacks ownership contract' >&2; exit 2; "
+            "fi; rm -f -- \"$pid_file\"; fi; "
             f"cd -- {remote_dir}; "
             f"nohup env G1_SDK_PATH=/home/unitree/unitree_sdk2_python {python} {script} "
             "--duration 3600 --max-pulses 10000 --robot g1 --enable-real-robot "
             "--execute-real-g1 --i-understand-this-will-move-the-robot "
+            f"{ownership} "
             f"> {log_file} 2>&1 < /dev/null & pid=$!; "
             "tmp=\"${pid_file}.$$\"; printf '%s\\n' \"$pid\" > \"$tmp\"; "
             "mv -f -- \"$tmp\" \"$pid_file\"; sleep 0.5; "
