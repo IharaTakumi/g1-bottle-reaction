@@ -1,0 +1,50 @@
+{
+  "hash_basis": "SHA-256 of exact Git blob bytes; deploy LF without rewriting",
+  "bundles": [
+    {
+      "source_sha": "adc7fada59492c09cc518c449bb3e5da945e1032",
+      "files": {
+        "patrol/README.md": "3a53bd390b3d381df05a008608401ba643f6088733d3b8568454b2a5b2757462",
+        "patrol/__init__.py": "47f3e7f2b5924a30555e7b31870e763e8b6f314db39b9951c8b60d7bcb0d2531",
+        "patrol/cleanup.py": "2f8bfdcca58a8ed3b1b557b99233dd371a97aab95a3cc810e865e05c7d183644",
+        "patrol/control_ipc.py": "2158f517b115cb879688990faaecaa87869e6914c3f000bc0beb274aa0dc3d65",
+        "patrol/control_lease.py": "80d647b45a8e1fd74ad40cabc0741e911148d9e14164e9c84323b9ef9cf912ce",
+        "patrol/control_lease.yaml": "b5af5f3aea0c01f1bb38278cf76ab72c0b35c9cd2f3989ae52c27d396b223f9a",
+        "patrol/lidar_guard.py": "ba7d63ea3708d156b249003c49ff36c08a98460a1304613320623cb8eefb626c",
+        "patrol/lidar_guard_relay.py": "83ae4e129802f4a29f6e6b4095233562d32b1333dfd120bc0131edd5add0cacb",
+        "patrol/locomotion_adapter.py": "21cf781dc3ecdfe5984fe7bdef285d3ee7f08c7443e3131cdd0dab529597c92a",
+        "patrol/locomotion_protocol.py": "0ab0a98b13c587356b691ff42cd56748133857bf7c33471ad1968aefa7711cb7",
+        "patrol/locomotion_relay.py": "159323ca770c9393d4f88d20167ca9b3f3e6bd6a620cc3232474e46490ca277e",
+        "patrol/locomotion_session.py": "ff82ab0c388a8ea109da26c2c3aff7381b8869ec186da71e750d49abe5695c1a",
+        "patrol/ownership.yaml": "28d41b738e6a33525df866d83c8602cd922ffaf13c9f463b71be2257ae1617ef",
+        "patrol/ownership_lock.py": "f243036cf791234f61ddd0bd26fbd073d4c81dd3794e6f3bbf4f606b19d27ee7",
+        "patrol/patrol_controller.py": "3091f4277fa25d2541ef9f5f1e0eb6c23a5af63a230a2d4ccc28213a97540903",
+        "patrol/run_patrol.py": "8bd1598fb12d91e12951f54b8e533d7dd7764a5afd2f8340f74243adfa889342",
+        "patrol/stationary_observer.py": "a193e0416d6b62d0927a48b259c6f4a545a21cecfda23a7f549af95ff6fb7ff4",
+        "patrol/stop_rpc.py": "d988c4fccfd8ccd51c09a2ef8023d6c7873580ab84d6d2c85392149ef736aa88",
+        "patrol/telemetry_evidence.py": "1f97101d3a3ce2e392f559b0dd9097f6ddefe04b69fb8cd7df4742fd390a26c5",
+        "patrol/udp_relay_guard.py": "acdec4fccc3c854259243e4ac71973d2242d89a8c194e56059915202e9666e8a",
+        "scripts/run_integrated_demo.py": "4ad812e32a3a200e4e7afcd2fdbb8e32f35b63764c26d633c81116802d5f5d9f",
+        "src/g1_bottle_reaction/adapters/motiondecode_reaction.py": "6733f650e90e791e58467b44872922fdb4e490d3587514e153940a8f1d6ea744",
+        "src/g1_bottle_reaction/game_vision/wander_interlock.py": "0600dd5ac7a50daed0c96c660c73e50aae85986cac3a8cb0631173e648efc0f9"
+      }
+    },
+    {
+      "source_sha": "8650cedcb26b8836d1686d1397fcc50cb470f25e",
+      "files": {
+        "robot_side/adapters/g1_robot.py": "01e3f613ec186065c148d0f2cffd401024355b3bd15330c326aa99951483722a",
+        "robot_side/ownership_lock.py": "f243036cf791234f61ddd0bd26fbd073d4c81dd3794e6f3bbf4f606b19d27ee7",
+        "robot_side/wander_reactive_mvp.py": "0b5b412b88373a271374fc38b72aec952dc9b5c0e2c2a1a531d60944be8b3699",
+        "scripts/g1-wander-reactive-mvp.py": "7ed8bda0b5853b9781ba0fb73aa6e6372f29774e51d3776f617ee9e9d4602fd0"
+      }
+    },
+    {
+      "source_sha": "0ee0e90bc4f42a40c00003be4d40caab03a6550a",
+      "files": {
+        "scripts/resident_protocol.py": "6b54eb1ace8d586dd105856c40945334405cddc4a010ecbd8eebcf987b0a5450",
+        "scripts/resident_worker.py": "cb1c8a151346d80132b269dbacf8f53a227160bd02fe3f546d2b166e9db9c3aa",
+        "scripts/resident_worker_client.py": "1c7475d761ada1f3835d799f8eb28a65d82c5be9f20291a872e57f9205fb0aaa"
+      }
+    }
+  ]
+}
