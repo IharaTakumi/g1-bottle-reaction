@@ -268,6 +268,39 @@ class PatrolController:
             self.state = PatrolState.STOPPED
             self.emit("[patrol] STOP")
 
+    def run_calibration_leg(self, kind: str) -> None:
+        """One calibration leg, left held for caller-owned post-STOP observation.
+
+        The caller owns the existing supervisor lease; this does not renew it.
+        No continuation, Reaction checkpoint, or second leg is scheduled. The
+        caller keeps checking/renewing the lease until controlled teardown.
+        """
+        if kind not in {"forward-stop", "turn-stop"}:
+            raise ValueError("one forward-stop or turn-stop leg required")
+        self._require_control_lease()
+        if self._lease_id is None:
+            raise RuntimeError("calibration movement requires supervisor lease")
+        try:
+            self.resume()
+            if kind == "forward-stop":
+                self._run_forward(PatrolState.FORWARD_OUT, self.config.forward_distance_m)
+            else:
+                self._run_turn(PatrolState.TURN_BACK, self.config.turn_angle_rad)
+            self._require_stop_confirmation()
+        except BaseException as exc:
+            self._record_failure(exc)
+            # Never retry an unconfirmed transaction. A Move failure may still
+            # need the existing correlated STOP attempt.
+            if getattr(self.locomotion, "stop_rpc_status", None) not in {
+                    "STOP_RPC_CONFIRMED", "STOP_UNCONFIRMED"}:
+                self._send_stop()
+            raise
+        finally:
+            self._paused.set()
+            self._pause_requested.set()
+            self._pause_acknowledged.set()
+            self.state = PatrolState.STOPPED if self._stop.is_set() else PatrolState.PAUSED
+
     def run_turn_only(self) -> None:
         try:
             self._run_turn(PatrolState.TURN_BACK, self.config.turn_angle_rad)

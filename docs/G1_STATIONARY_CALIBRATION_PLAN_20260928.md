@@ -2,35 +2,37 @@
 
 F04-A: CLOSED. F04-B observer logic: OFFLINE READY.
 Physical stationary production gate: **OPEN — REAL G1 CALIBRATION REQUIRED**.
-This preparation changes no production code, threshold, protocol, lease, ownership,
-watchdog, motion or Reaction behavior. All commands below are future operator steps;
+This preparation changes no production algorithm, threshold, protocol, lease, ownership,
+watchdog or Reaction behavior; the controller adds only a public single-leg entrypoint.
+All commands below are future operator steps;
 no hardware connection was made while preparing this document.
 
 ## 0. Readiness and stop points
 
 Use this document top to bottom. Record the operator, safety observer, date, site,
 session ID, all deviations and GO/NO-GO decisions in `session-review.json`.
-There is **no executable motion recipe supplied by this preparation**. Source inspection
-found two concrete prerequisites that must be resolved before Trial B/C:
+`scripts/run_stationary_calibration.py` is the dedicated calibration entrypoint.
+It does not launch/import the Integrated Supervisor, Reaction, Vision, MotionDecode,
+audio or Wander. Its movement worker calls `PatrolController.run_calibration_leg`,
+which resumes under the existing F03 lease, executes exactly one existing forward
+or turn leg, confirms its existing v4 STOP, and remains paused/HELD for observation.
+The main thread alone renews the lease through POST_STOP observation and its flush.
+The movement worker checks (never renews) that same lease while held, so a main
+hang during observation still faults through F03. There is no independent heartbeat
+thread. No second leg or resume is scheduled.
+Standing constructs no command adapter/session and sends no claim, Move or STOP.
 
-1. `scripts/run_integrated_demo.py` always starts a Reaction child. Do not use it
-   for the initial calibration; neither `--headless` nor `--no-locomotion` means
-   “Reaction disabled”. `patrol/run_patrol.py` supports turn-only or one-cycle,
-   but has no forward-only CLI. The one-cycle path continues through subsequent
-   turns/legs. Its historical README command does not supply the current required
-   supervisor lease. It is **not** the first-session calibration command.
-2. Existing relay UDP is a latest-snapshot feed, not a complete raw source/event
-   recorder. It does not provide verified source-clock conversion, a source baseline
-   at commit, or exact HOLD/PREPARED/COMMIT event timestamps. No recorder or motion
-   supervisor is introduced here. Inventory an already reviewed acquisition and
-   Reaction-OFF finite-trial control procedure; record its exact command, hash,
-   lifecycle, lease refresh ownership and STOP behavior before GO. If absent,
-   remain NO-GO for motion and schedule that narrowly scoped prerequisite separately.
+The recorder preserves exact received relay datagrams plus canonical fields, and
+exact v4 client send/receive datagrams plus validated STOP event records. It does
+not invent DDS samples between snapshots or reconstruct source values discarded
+before relay serialization. It does not establish a source baseline at the relay's
+atomic commit instant or a verified source-clock conversion. Those remain real
+calibration questions, not software-side guarantees.
 
-Do not work around these gaps with direct SDK calls, a one-shot writer, a dummy
-heartbeat loop, removed gates, or timing a keyboard interrupt to isolate a leg.
-Preparatory review and offline analysis can proceed now. Actual motion readiness
-cannot be inferred from this runbook or an offline test PASS.
+Review this harness before deployment. Do not substitute the production Integrated
+Supervisor: it still starts Reaction and its behavior is unchanged. Do not use a
+one-shot SDK writer, a dummy heartbeat loop, or keyboard timing to isolate a leg.
+Actual motion readiness requires the deployment/physical checklist below.
 
 ## 1. Freeze and verify deployment before any motion
 
@@ -163,7 +165,7 @@ Every record has:
 | schema_version | integer 1 |
 | session_id, trial_id, pc_clock_id | nonempty strings; change clock ID after PC boot/clock reset |
 | record_type | `sample` or `marker` |
-| phase | PRE, MOVING, STOP_REQUESTED, STOP_RPC_PREPARED, STOP_RPC_CONFIRMED, POST_STOP_OBSERVATION, EXTERNAL_STATIONARY_MARK, END |
+| phase | PRE, MOVEMENT_ENABLE, MOVING, STOP_REQUESTED, STOP_RPC_PREPARED, STOP_RPC_CONFIRMED, POST_STOP_OBSERVATION, POST_STOP_OBSERVATION_COMPLETE, CONTROLLED_TEARDOWN, EXTERNAL_STATIONARY_MARK, END |
 | pc_receive_monotonic_s | finite local PC receipt/event-log time; preserve clock provenance |
 | relay_epoch, owner_session, movement_generation, stop_request_id | actual UUID strings, or null when unobserved; never invent IDs |
 | stop_transaction_state | observed state, or `UNOBSERVED`; never infer confirmed from a button press |
@@ -190,7 +192,8 @@ objects may contain converted positions/gyro/source times with method and review
 references; the raw analyzer does not use them for authorization. Preserve complete
 original SDK fields in sidecars if relay extraction rejected them to null.
 Marker records do not require sample fields. For B/C keep one target STOP per trial;
-initialization STOPs must be separately labeled/trial-ID scoped. If multiple confirmed
+initialization/cleanup STOPs are separately scoped and excluded from the primary
+STOP origin. If multiple primary confirmed
 markers remain, the analyzer refuses to choose a timeline origin automatically.
 
 Clock status values: `UNVERIFIED`, `CANDIDATE`, `VERIFIED_FOR_THIS_SESSION`, `INVALID`.
@@ -210,13 +213,12 @@ python -B scripts/analyze_stationary_calibration.py /path/to/trial/raw.jsonl > /
 ```
 
 The second command only reads a file; redirection creates an analysis artifact.
-No socket, SSH, SDK, device, recorder, launcher, or threshold selection is used.
-Before real acquisition, the operator must verify the capture procedure can preserve
-all source values, PC receipt time and genuine protocol events without blocking the
-control thread/lease. A relay snapshot cannot reconstruct exact PREPARED timing or
-commit baselines after the fact. Missing events are UNOBSERVED, not fabricated.
-If acquisition cannot meet this requirement, record exploratory standing data only;
-do not claim observer replay readiness or initiate motion for an incomplete trace.
+No socket, SSH, SDK, device, launcher, or threshold selection is used by the analyzer.
+The dedicated harness records telemetry at PC receipt and protocol datagrams at the
+existing session socket boundary. PREPARED/CONFIRMED events are emitted only after
+the existing session validates replies. These timestamps are PC observations, not
+relay RPC processing timestamps. Missing/failed events remain unconfirmed.
+Confirm data completeness and video synchronization before progressing beyond pilot.
 
 ## 5. Experiment matrix and per-trial procedure
 
@@ -242,10 +244,10 @@ Validated-condition references: `patrol/README.md`, `patrol/patrol_controller.py
 0.50/0.25 rad/s, existing 150-degree slow transition and 177-degree stop condition
 for the nominal 180-degree turn. These are existing settings, not newly certified
 safe values. Do not change them here or infer that every lower speed/new distance
-is validated. The 2 m first leg is a reference for B; it is **not** permission to
-launch the whole cycle and hope to pause before its next turn. C's existing turn-only
-mode still needs the reviewed lease-owning Reaction-OFF controller described in §0.
-If the approved site procedure cannot isolate these conditions, B/C remain NO-GO.
+is validated. The harness uses this exact existing `PatrolConfig()` profile without
+motion parameter overrides. B invokes only the first forward leg; C only the turn
+leg. Neither invokes the complete cycle. Review the displayed/manifest profile
+before approving either trial.
 
 For each trial, execute the following checklist through the approved procedure:
 
@@ -387,10 +389,107 @@ production serialization or removal of STOP-barrier coverage. Not changed here.
 - [ ] Old/unknown writers absent; canonical lock inode/mount and owner checked.
 - [ ] v4 client/relay and F03 lease healthy; emergency procedure and clear area ready.
 - [ ] Reaction/MotionDecode/Wander OFF; reviewed finite single-trial control procedure
-      preserves those layers (exact command/hash recorded); §0 gaps resolved.
+      preserves those layers (exact command/hash recorded); harness review complete.
 - [ ] Capture rehearsal passes; raw provenance, protocol events and independent video
       available; operator approvals recorded for this trial only.
 
 An unchecked box means no first motion. This runbook is preparation, not hardware
-approval. Offline safety architecture work stops here; acquisition/control prerequisite
-work, if needed, must be separately scoped before scheduling motion calibration.
+approval. Offline safety architecture work stops here; verify the actual deployed
+pair, captured fields and physical environment before scheduling motion calibration.
+
+## 11. Dedicated harness command skeletons (future authorized session only)
+
+Do NOT execute these as part of offline development. Replace every placeholder
+with operator-verified values; the harness does not deploy/start the G1 relay,
+LiDAR relay, SDK or any other process. Relay telemetry must be directed to the
+exclusive PC receiver endpoint. Do not run another consumer on that bind/port.
+
+Standing capture (no locomotion socket/session, no robot command):
+
+```bash
+"$PYTHON" -B scripts/run_stationary_calibration.py \
+  --mode standing --execute --session-id "$SESSION_ID" --trial-id A01 \
+  --output "$EXTERNAL_DATA_ROOT" \
+  --telemetry-bind "$PC_IPV4" --telemetry-port "$TELEMETRY_PORT" --telemetry-peer "$RELAY_IPV4" \
+  --pre-seconds 5 --post-seconds 5 --trial-timeout 20 \
+  --external-video "$VIDEO_FILE" --stdin-markers
+```
+
+One forward trial (replace forward-stop with turn-stop and a new ID for C):
+
+```bash
+G1_ALLOW_REAL_ACTION=1 "$PYTHON" -B scripts/run_stationary_calibration.py \
+  --mode forward-stop --execute --enable-real-robot --confirm-site-ready \
+  --operator-approved-calibration --confirm-external-recording \
+  --session-id "$SESSION_ID" --trial-id B01 --output "$EXTERNAL_DATA_ROOT" \
+  --telemetry-bind "$PC_IPV4" --telemetry-port "$TELEMETRY_PORT" --telemetry-peer "$RELAY_IPV4" \
+  --relay-host "$RELAY_IPV4" --relay-port "$COMMAND_PORT" \
+  --lidar-bind "$PC_IPV4" --lidar-port "$LIDAR_PORT" \
+  --pre-seconds 3 --post-seconds 10 --trial-timeout "$APPROVED_TOTAL_TIMEOUT_SECONDS" \
+  --external-video "$VIDEO_FILE" --stdin-markers
+```
+
+The total deadline is an explicitly approved finite recording/trial duration,
+not a replacement STOP latency guarantee. It must exceed PRE + POST and allow the
+existing finite movement. No speed/distance/yaw CLI overrides exist. `--loops` only
+accepts 1; `--reverse` is rejected. No approvals are synthesized. All explicit
+motion approvals, video confirmation and environment gate are required before I/O.
+
+While running, type `m` then Enter to append an
+`OPERATOR_EXTERNAL_STATIONARY_MARK` timestamp. This local input cannot send robot
+commands. It is an operator observation, not physical proof; it does not end POST
+recording or authorize movement. Link its timing uncertainty to video afterward.
+EOF, unavailable stdin/terminal or input parsing exceptions disable only marker input.
+An OPERATOR_MARKER_STATUS record reports `operator_marker_status=unavailable` and
+`operator_marker_error`. The trial continues on its unchanged control path; marker
+loss does not change the external-camera requirement or any operator approval.
+Actual output/queue failure is still recorder-fatal, including if discovered while
+writing a marker diagnostic. The input thread never renews or mutates the lease.
+SIGINT/SIGTERM abort the trial through the existing STOP path; no automatic retry.
+
+Output: `$EXTERNAL_DATA_ROOT/$SESSION_ID/$TRIAL_ID/` containing `canonical.jsonl`,
+`manifest.json`, `operator_notes.txt`. Existing trial directories are rejected.
+Keep output outside Git. Manifest records runtime HEAD/branch, Python, protocol v4,
+ownership contract v1, full existing profile and CLI, clock ID, video path and blank
+deployment-evidence fields for later SDK/hash/process evidence. Initial clock status
+is UNVERIFIED and no observer evaluation occurs.
+
+Canonical `event` adds TRIAL_START, PRE, TRIAL_ACTIVE, MOVEMENT_ENABLE, MOVING, STOP_REQUESTED,
+STOP_RPC_PREPARED, STOP_RPC_CONFIRMED, POST_STOP_OBSERVATION,
+POST_STOP_OBSERVATION_COMPLETE, CONTROLLED_TEARDOWN,
+OPERATOR_EXTERNAL_STATIONARY_MARK and TRIAL_END. Initial resume's required STOP uses
+`command_scope=initialization`; the analyzer excludes it when choosing the primary
+STOP timeline origin. The normal lifecycle is primary STOP_RPC_CONFIRMED ->
+POST_STOP_OBSERVATION (lease active, same owner, HELD, no Move) ->
+POST_STOP_OBSERVATION_COMPLETE -> flush -> CONTROLLED_TEARDOWN -> quiesce the
+lease-checking worker -> ordinary controller.stop() -> close control/receiver
+resources -> TRIAL_END -> final recorder close. Cleanup STOP uses
+`command_scope=cleanup` and is also excluded from the primary timeline origin.
+Normal motion trials therefore have initial, primary and cleanup transactions;
+cleanup occurs only after required observation completes. Expected shutdown does
+not use lease expiry. The final TRIAL_END outcome is CONTROL_CLOSED, not a physical
+stationary claim or a guarantee that the subsequent file close cannot fail; any
+final close exception still returns trial failure. Cleanup attempts are independent
+so an adapter/receiver close error cannot skip recorder closure.
+Raw send/receive events retain even rejected replies; only validated replies produce
+PREPARED/CONFIRMED. MOVING means first command attempt, not physical motion onset.
+An interrupted/failed trial produces TRIAL_FAILURE when the file remains writable.
+
+The bounded recorder queue preserves datagrams as base64 plus canonical values.
+Malformed packets have TELEMETRY_INVALID records with original bytes. No unwrap,
+unit conversion or clock verification is performed. The main supervisor checks
+flush acknowledgements before renewing its lease. Open/schema/initial flush failure
+prevents all sockets; queue overflow, write failure, flush timeout or receiver failure
+latches recording failure, inhibits future Move/enable, and attempts existing STOP.
+STOP recording failure cannot suppress the actual STOP transaction. Some records
+may be lost after fatal disk failure; that trial fails and no completeness claim is
+made. OS/process death, blocked SDK, physical stopping distance and source-clock
+truth are not newly guaranteed. The relay's existing watchdog remains unchanged.
+
+Before first motion explicitly sign off: deployed SHA/hash (including new harness,
+recorder and controller public entrypoint), old writer absence, ownership lock
+availability, Control Lease health, v4 STOP pair, recorder running, external camera
+recording, Reaction OFF, single finite parameters and operator approval. The original
+F04-B hash manifest remains a historical baseline; controller now has an added public
+entrypoint, so generate/verify a deployment manifest from the reviewed harness commit
+rather than treating its historical controller hash as the new deployed hash.

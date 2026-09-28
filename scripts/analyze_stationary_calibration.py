@@ -6,8 +6,9 @@ import math
 from pathlib import Path
 
 STATUSES = {"UNVERIFIED", "CANDIDATE", "VERIFIED_FOR_THIS_SESSION", "INVALID"}
-PHASES = {"PRE", "MOVING", "STOP_REQUESTED", "STOP_RPC_PREPARED",
-          "STOP_RPC_CONFIRMED", "POST_STOP_OBSERVATION", "EXTERNAL_STATIONARY_MARK", "END"}
+PHASES = {"PRE", "MOVEMENT_ENABLE", "MOVING", "STOP_REQUESTED", "STOP_RPC_PREPARED",
+          "STOP_RPC_CONFIRMED", "POST_STOP_OBSERVATION", "POST_STOP_OBSERVATION_COMPLETE",
+          "CONTROLLED_TEARDOWN", "EXTERNAL_STATIONARY_MARK", "END"}
 IDENTITIES = ("relay_epoch", "owner_session", "movement_generation", "stop_request_id")
 RAW = ("odom_x_raw", "odom_y_raw", "odom_yaw_raw", "odom_stamp_raw",
        "lowstate_yaw_raw", "lowstate_tick_raw", "lowstate_tick_unwrapped")
@@ -134,7 +135,9 @@ def summarize(records):
         times = [r["pc_receive_monotonic_s"] for r in samples]
         intervals = [b-a for a, b in zip(times, times[1:])]
         markers = [r for r in rows if r["record_type"] == "marker"]
-        confirms = [r for r in markers if r["phase"] == "STOP_RPC_CONFIRMED"]
+        confirms = [r for r in markers if r["phase"] == "STOP_RPC_CONFIRMED"
+                    and r.get("event", "STOP_RPC_CONFIRMED") == "STOP_RPC_CONFIRMED"
+                    and r["transport"].get("command_scope") not in {"initialization", "cleanup"}]
         # Multiple confirmations are ambiguous: no automatic choice of STOP.
         origin = confirms[0]["pc_receive_monotonic_s"] if len(confirms) == 1 else None
         xy = [(s["odom_x_raw"], s["odom_y_raw"]) for s in samples
