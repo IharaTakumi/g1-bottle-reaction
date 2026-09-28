@@ -73,6 +73,8 @@ class UnitreeSdkRuntime:
             raise ValueError('One-shot locomotion is restricted to PC2 eth0')
         if timeout <= 0:
             raise ValueError('Locomotion timeout must be positive')
+        from patrol.ownership_lock import acquire_process_lock
+        acquire_process_lock()
         require_runtime()
         configure_sdk_path()
         from unitree_sdk2py.core import channel

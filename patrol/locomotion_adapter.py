@@ -8,6 +8,13 @@ import json
 import socket
 import math
 
+try:
+    from .ownership_lock import acquire_process_lock
+    from .locomotion_session import RelaySession
+except ImportError:
+    from ownership_lock import acquire_process_lock
+    from locomotion_session import RelaySession
+
 
 MAX_SPEED_M_S = 0.30
 
@@ -17,15 +24,17 @@ class UdpLocomotionAdapter:
 
     def __init__(self, host: str = "10.42.0.76", port: int = 47622,
                  telemetry_bind: str = "10.42.0.1", telemetry_port: int = 47623):
-        self._destination = (host, port)
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._seq = 0
         self._closed = False
         self._imu_lock = threading.Lock()
         self._imu = None
         self._telemetry = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._telemetry.bind((telemetry_bind, telemetry_port))
         self._telemetry.settimeout(0.1)
+        try:
+            self._session = RelaySession(host, port)
+        except BaseException:
+            self._telemetry.close()
+            raise
         self._telemetry_thread = threading.Thread(target=self._receive_telemetry, daemon=True)
         self._telemetry_thread.start()
 
@@ -56,12 +65,10 @@ class UdpLocomotionAdapter:
             return None
         return sample
 
-    def _send(self, message):
+    def enable_movement(self):
         if self._closed:
             raise RuntimeError("UDP locomotion adapter is closed")
-        message["seq"] = self._seq
-        self._seq += 1
-        self._socket.sendto(json.dumps(message, separators=(",", ":")).encode(), self._destination)
+        self._session.enable()
 
     def move(self, vx: float, vyaw: float = 0.0) -> None:
         vx = float(vx)
@@ -70,13 +77,11 @@ class UdpLocomotionAdapter:
         vyaw = float(vyaw)
         if not -0.50 <= vyaw <= 0.50:
             raise ValueError("vyaw must be within +/-0.50 rad/s")
-        self._send({"vx": vx, "vy": 0.0, "vyaw": vyaw})
+        self._session.move(vx, vyaw)
 
     def stop(self) -> None:
-        # Duplicate STOP datagrams tolerate a single UDP loss. Sequence numbers
-        # remain unique, so both are valid and idempotent at the relay.
-        self._send({"command": "stop"})
-        self._send({"command": "stop"})
+        # Protocol HOLD acceptance only; not a physical STOP acknowledgement.
+        self._session.hold()
 
     def close(self) -> None:
         if self._closed:
@@ -87,7 +92,7 @@ class UdpLocomotionAdapter:
             self._closed = True
             self._telemetry_thread.join(timeout=0.5)
             self._telemetry.close()
-            self._socket.close()
+            self._session.close()
 
 
 class DryRunLocomotionAdapter:
@@ -132,6 +137,7 @@ class LocomotionAdapter:
             raise RuntimeError("real locomotion requires --arm")
         if watchdog_timeout <= 0:
             raise ValueError("watchdog timeout must be positive")
+        acquire_process_lock()
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize
         from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
         ChannelFactoryInitialize(0, interface)

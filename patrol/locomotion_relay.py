@@ -10,6 +10,13 @@ import socket
 import threading
 import time
 
+try:
+    from .ownership_lock import acquire_process_lock
+    from .locomotion_protocol import RelayOwnership, serve_datagram
+except ImportError:
+    from ownership_lock import acquire_process_lock
+    from locomotion_protocol import RelayOwnership, serve_datagram
+
 
 MAX_VX = 0.30
 MAX_VY = 0.20
@@ -41,6 +48,8 @@ def parser():
 
 
 def real_runtime(interface, create_loco):
+    if create_loco:
+        acquire_process_lock()
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
     from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
@@ -141,15 +150,13 @@ def main(argv=None):
     sock.bind((args.bind, args.port))
     sock.settimeout(0.05)
     started = time.monotonic()
-    last_valid = time.monotonic()
-    last_seq = -1
-    moving = False
+    ownership = RelayOwnership(client, watchdog_timeout=args.watchdog_timeout,
+                               allow_reverse=args.allow_reverse)
     next_telemetry = time.monotonic()
 
     def stop(reason):
-        nonlocal moving
+        ownership.state = "FAULT"
         client.StopMove()
-        moving = False
         print(f"[loco-relay] STOP reason={reason}", flush=True)
 
     try:
@@ -182,25 +189,7 @@ def main(argv=None):
                 }, separators=(",", ":")).encode(),
                     (args.telemetry_host, args.telemetry_port))
                 next_telemetry = now + 0.02
-            try:
-                payload, peer = sock.recvfrom(4096)
-                seq, command, velocity = decode(payload, args.allow_reverse)
-                if seq <= last_seq:
-                    raise ValueError("stale or duplicate sequence")
-                last_seq = seq
-                last_valid = time.monotonic()
-                if command == "stop":
-                    stop(f"command seq={seq}")
-                else:
-                    vx, vy, vyaw = velocity
-                    client.Move(vx, vy, vyaw, continous_move=True)
-                    moving = True
-                    print(f"[loco-relay] MOVE seq={seq} vx={vx:+.3f} peer={peer[0]}", flush=True)
-            except socket.timeout:
-                if moving and time.monotonic() - last_valid > args.watchdog_timeout:
-                    stop("watchdog timeout")
-            except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-                stop(f"invalid packet: {exc}")
+            serve_datagram(sock, ownership)
     except KeyboardInterrupt:
         stop("Ctrl+C")
     except BaseException:

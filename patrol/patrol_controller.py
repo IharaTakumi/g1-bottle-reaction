@@ -164,6 +164,8 @@ class PatrolController:
             raise
         with self._motion_lock:
             self._require_control_lease()
+            self._enable_relay_movement()
+            self._require_control_lease()  # Network enable must not outlive F03.
             self._finish_resume()
 
     def _finish_resume(self) -> None:
@@ -645,8 +647,21 @@ class PatrolController:
             if (self._paused.is_set() or self._stop.is_set()
                     or self._recovering_telemetry.is_set()):
                 return False
+            # Explicit protocol enable when navigation continues after a stage
+            # STOP or obstacle hold. The adapter never enables from move().
+            self._enable_relay_movement()
+            if not self.check_control_lease() or self._stop.is_set() or self._paused.is_set():
+                return False
             self.locomotion.move(vx, vyaw)
             return True
+
+    def _enable_relay_movement(self):
+        enable = getattr(self.locomotion, "enable_movement", None)
+        if enable is not None:
+            if self._lease_id is None:
+                raise RuntimeError("owned relay movement requires a supervisor control lease")
+            self._require_control_lease()
+            enable()
 
     def _send_stop(self) -> None:
         with self._motion_lock:
