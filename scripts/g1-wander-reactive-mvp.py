@@ -143,6 +143,8 @@ def build_parser():
     parser.add_argument("--enable-real-robot", action="store_true")
     parser.add_argument("--execute-real-g1", action="store_true")
     parser.add_argument("--i-understand-this-will-move-the-robot", action="store_true")
+    parser.add_argument("--require-locomotion-ownership-v1", action="store_true",
+                        help="require the process-lifetime canonical locomotion lock")
     return parser
 
 
@@ -161,11 +163,15 @@ def main(argv=None, runtime=None):
         print("DRY RUN", flush=True)
         print("NO G1 COMMAND SENT", flush=True)
         return 0
+    if not args.require_locomotion_ownership_v1:
+        raise ValueError("real Wander requires --require-locomotion-ownership-v1")
     conflicts = body_writer_conflicts()
     if conflicts:
         raise RuntimeError("body writer conflict: " + "; ".join(conflicts))
     runtime = runtime or UnitreeSdkRuntime()
-    client = runtime.create_loco_client(args.interface, args.timeout)
+    # An old runtime rejects this keyword before it can initialize an SDK writer.
+    client = runtime.create_loco_client(
+        args.interface, args.timeout, require_locomotion_ownership_v1=True)
     code, fsm_id = client.GetFsmId()
     print("FSM: code=%r id=%r" % (code, fsm_id), flush=True)
     if code != 0 or fsm_id != 501:

@@ -67,12 +67,16 @@ class UnitreeSdkRuntime:
             'string': String_,
         }
 
-    def create_loco_client(self, interface, timeout):
+    def create_loco_client(self, interface, timeout, *, require_locomotion_ownership_v1=False):
         """Create the explicit one-shot G1 locomotion client."""
         if interface != 'eth0':
             raise ValueError('One-shot locomotion is restricted to PC2 eth0')
         if timeout <= 0:
             raise ValueError('Locomotion timeout must be positive')
+        if type(require_locomotion_ownership_v1) is not bool:
+            raise ValueError('invalid locomotion ownership contract')
+        from ..ownership_lock import acquire_process_lock
+        acquire_process_lock()
         require_runtime()
         configure_sdk_path()
         from unitree_sdk2py.core import channel
