@@ -250,6 +250,41 @@ def wait_idle(controller):
     assert not controller.busy
 
 
+def test_turn_phase_inhibits_all_reaction_targets():
+    for target, motion in (("person", "motiondecode:found"),
+                           ("banana", "motiondecode:surprise"),
+                           ("plushie", "motiondecode:surprise")):
+        events = []
+        settings = FoundSettings(.25, .15, 1, 2, (Path("reaction.wav"),), "mock", 1)
+        patrol = FakePatrol(events); patrol.phase = "TURN_BACK"
+        controller = FoundReactionController(
+            {target: settings}, Output(events), Robot(events),
+            base_reaction=Reaction("R", "notice", "unused", 0),
+            cooldown_seconds=0, motion_overrides={target: motion},
+            speech_delay_overrides={target: 0}, patrol=patrol,
+        )
+        try:
+            assert controller.trigger(target, 1) is False
+            assert motion not in events and "AUDIO" not in events
+        finally:
+            controller.close()
+
+
+def test_success_latches_target_only_for_current_forward_leg():
+    events = []
+    controller, patrol = build(events)
+    try:
+        assert controller.trigger("person", 1)
+        wait_idle(controller)
+        assert controller.trigger("person", 2) is False
+        patrol.forward_leg_id += 1
+        assert controller.trigger("person", 3)
+        wait_idle(controller)
+        assert events.count("motiondecode:found") == 2
+    finally:
+        controller.close()
+
+
 def test_patrol_resumes_only_after_motion_audio_and_q0_weight_zero():
     events = []
     controller, patrol = build(events)

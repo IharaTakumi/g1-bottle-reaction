@@ -105,7 +105,7 @@ class FoundWavSpeechBackend(SpeechBackend):
         with self._callback_lock:
             callback, self._start_callback = self._start_callback, None
             gate, self._start_gate = self._start_gate, None
-        if gate is not None and not gate.wait(5.0):
+        if gate is not None and not gate.wait(30.0):
             self.last_attempt_successful = False
             print(f"AUDIO START CANCELLED: {path}", flush=True)
             return

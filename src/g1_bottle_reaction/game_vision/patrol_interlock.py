@@ -71,7 +71,11 @@ class LocalPatrolController:
     def reaction_context(self, target: str, *, force: bool = False) -> dict[str, object]:
         now = time.monotonic()
         if force or self._status_cache is None or now - self._status_cached_at >= .15:
-            self._status_cache = self._request({"operation": "status"}, 1.0)
+            try:
+                self._status_cache = self._request({"operation": "status"}, 1.0)
+            except PatrolInterlockError as exc:
+                return {"eligible": False, "phase": None, "paused": True,
+                        "error": str(exc)}
             self._status_cached_at = now
         status = dict(self._status_cache)
         leg_id = status.get("forward_leg_id")
