@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import socket
+import time
 
 
 class PatrolInterlockError(RuntimeError):
@@ -22,6 +23,9 @@ class LocalPatrolController:
         self._pause_owned = False
         self._failed = False
         self.last_stop_sent_monotonic: float | None = None
+        self._status_cache: dict[str, object] | None = None
+        self._status_cached_at = -float("inf")
+        self._successful_by_leg: dict[int, set[str]] = {}
 
     @property
     def running(self) -> bool:
@@ -63,6 +67,26 @@ class LocalPatrolController:
         self.last_stop_sent_monotonic = (
             float(value) if isinstance(value, (int, float)) else None
         )
+
+    def reaction_context(self, target: str, *, force: bool = False) -> dict[str, object]:
+        now = time.monotonic()
+        if force or self._status_cache is None or now - self._status_cached_at >= .15:
+            self._status_cache = self._request({"operation": "status"}, 1.0)
+            self._status_cached_at = now
+        status = dict(self._status_cache)
+        leg_id = status.get("forward_leg_id")
+        eligible = (
+            status.get("phase") in {"FORWARD_OUT", "FORWARD_RETURN", "FORWARD_HOME"}
+            and not status.get("paused") and not status.get("pause_pending")
+            and not status.get("telemetry_recovering") and not status.get("stopped")
+            and not status.get("error")
+            and isinstance(leg_id, int)
+            and target not in self._successful_by_leg.get(leg_id, set())
+        )
+        return {**status, "eligible": bool(eligible)}
+
+    def mark_reaction_success(self, target: str, leg_id: int) -> None:
+        self._successful_by_leg.setdefault(int(leg_id), set()).add(target)
 
     def wait_reaction_ready(self) -> None:
         if self._failed or not self._pause_owned:

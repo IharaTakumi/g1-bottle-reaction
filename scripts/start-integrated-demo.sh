@@ -3,12 +3,22 @@ set -euo pipefail
 
 root=/home/ubuntu/dev/g1-bottle-reaction
 control=${G1_SSH_CONTROL:-$root/.runtime/usb-camera-ssh/wifi-control}
-target=${G1_SSH_TARGET:-unitree@10.42.0.76}
+target=${G1_SSH_TARGET:?Set G1_SSH_TARGET to the currently routed G1 session}
+host=${target##*@}
+route=$(ip -j route get "$host")
+read -r interface local_ip < <(ROUTE="$route" python3 - <<'PY'
+import json, os
+r = json.loads(os.environ['ROUTE'])
+if len(r) != 1 or not r[0].get('dev') or not r[0].get('prefsrc'):
+    raise SystemExit('G1 route is not uniquely resolved')
+print(r[0]['dev'], r[0]['prefsrc'])
+PY
+)
 
 command=(/home/ubuntu/.venvs/g1-game-vision/bin/python -B tools/g1_dual_camera.py \
-  --usb-bind 10.42.0.1 \
-  --usb-host 10.42.0.76 \
-  --network-interface wlp128s20f3 \
+  --usb-bind "$local_ip" \
+  --usb-host "$host" \
+  --network-interface "$interface" \
   --ssh-target "$target" \
   --ssh-control "$control" \
   --g1-camera-transport ssh-rtp \
@@ -30,9 +40,10 @@ command=(/home/ubuntu/.venvs/g1-game-vision/bin/python -B tools/g1_dual_camera.p
   --motiondecode-repository /home/ubuntu/dev/motiondecode-test \
   --motiondecode-transport ssh \
   --motiondecode-socket /tmp/motiondecode-reaction.sock \
-  --motiondecode-timeout 420 \
+  --motiondecode-timeout 30 \
   --enable-real-robot \
   --confirm-site-ready \
+  --hackathon-runtime \
   --with-wander \
   --wander-ssh-target "$target" \
   --wander-remote-dir /home/unitree/g1-bottle-reaction-wander)

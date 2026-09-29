@@ -9,6 +9,7 @@ import pytest
 
 from g1_bottle_reaction.adapters.motiondecode_reaction import (
     MotionDecodeReactionAdapter,
+    MotionDecodeRecoverableAbort,
     MotionDecodeSafeReturnMiss,
     parse_named_result,
 )
@@ -337,6 +338,55 @@ def test_safe_return_miss_raises_typed_failure_then_allows_next_success(
     assert [request["operation"] for request in channel.requests] == [
         "status", "execute", "status", "execute"
     ]
+
+
+def test_hackathon_recoverable_abort_is_typed_and_does_not_disable_next_event(
+    tmp_path: Path,
+) -> None:
+    recoverable = real_result("found") | {
+        "status": "recoverable_abort",
+        "classification": "RECOVERABLE_ABORT",
+        "motion_completed": False,
+        "recoverable_reason": "Robot tilt/angular motion exceeds first-test limits",
+    }
+    channel = ResultSequenceChannel([recoverable, real_result("found")])
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path, real=True, enabled=True, hackathon_runtime=True,
+        channel_factory=lambda: channel,
+    )
+    with pytest.raises(MotionDecodeRecoverableAbort):
+        adapter.play_motion("motiondecode:found")
+    adapter.play_motion("motiondecode:found")
+    assert adapter.wait_for_motion_complete("motiondecode:found") is True
+
+
+@pytest.mark.parametrize(
+    "unsafe_status",
+    [
+        safe_resident_status(ownership_safe=False),
+        safe_resident_status(external_writers=1),
+        safe_resident_status(state="FAULT", fault="collision hard fault"),
+        safe_resident_status(weight=0.1),
+    ],
+)
+def test_hackathon_recoverable_abort_requires_safe_postflight(
+    tmp_path: Path, unsafe_status: dict,
+) -> None:
+    recoverable = real_result("found") | {
+        "status": "recoverable_abort",
+        "classification": "RECOVERABLE_ABORT",
+        "motion_completed": False,
+        "recoverable_reason": "typed envelope exceed",
+    }
+    channel = ResultSequenceChannel(
+        [recoverable], [safe_resident_status(), unsafe_status]
+    )
+    adapter = MotionDecodeReactionAdapter(
+        tmp_path, real=True, enabled=True, hackathon_runtime=True,
+        channel_factory=lambda: channel,
+    )
+    with pytest.raises(RuntimeError, match="returned failure"):
+        adapter.play_motion("motiondecode:found")
 
 
 @pytest.mark.parametrize(

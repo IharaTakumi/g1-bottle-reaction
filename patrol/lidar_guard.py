@@ -13,6 +13,7 @@ from typing import Iterable, Iterator
 
 class GuardState(str, Enum):
     CLEAR = "CLEAR"
+    CONFIRMING = "CONFIRMING"
     BLOCKED = "BLOCKED"
     STALE = "STALE"
 
@@ -21,6 +22,7 @@ class GuardState(str, Enum):
 class GuardConfig:
     stale_after_s: float = 0.50
     clear_hold_s: float = 0.40
+    block_confirm_s: float = 0.10
     stop_distance_m: float = 0.80
     corridor_half_width_m: float = 0.55
     min_range_m: float = 0.25
@@ -79,11 +81,12 @@ class LidarGuard:
         self._lock = threading.Lock()
         self._last_scan_at: float | None = None
         self._scan_times: list[float] = []
-        self._blocked = {"front": True, "rear": True}
-        self._clear_since = {"front": None, "rear": None}
-        self._stop_points = {"front": 0, "rear": 0}
-        self._coverage_points = {"front": 0, "rear": 0}
-        self._nearest = {"front": None, "rear": None}
+        self._blocked = {"front": True, "rear": True, "turn": True}
+        self._blocking_since = {"front": None, "rear": None, "turn": None}
+        self._clear_since = {"front": None, "rear": None, "turn": None}
+        self._stop_points = {"front": 0, "rear": 0, "turn": 0}
+        self._coverage_points = {"front": 0, "rear": 0, "turn": 0}
+        self._nearest = {"front": None, "rear": None, "turn": None}
         self._total_scan_points = 0
         self._error: str | None = "no scan received"
 
@@ -92,9 +95,9 @@ class LidarGuard:
 
     def update_points(self, points: Iterable[tuple[float, float, float]]) -> None:
         now = self._clock()
-        stop = {"front": 0, "rear": 0}
-        coverage = {"front": 0, "rear": 0}
-        nearest = {"front": math.inf, "rear": math.inf}
+        stop = {"front": 0, "rear": 0, "turn": 0}
+        coverage = {"front": 0, "rear": 0, "turn": 0}
+        nearest = {"front": math.inf, "rear": math.inf, "turn": math.inf}
         total_scan_points = 0
         try:
             for raw_x, raw_y, raw_z in points:
@@ -108,6 +111,13 @@ class LidarGuard:
                     continue
                 direction = "front" if x > 0 else "rear"
                 distance = abs(x)
+                radial_distance = math.hypot(x, left)
+                if radial_distance >= self.config.min_range_m:
+                    if radial_distance <= 4.0:
+                        coverage["turn"] += 1
+                    if radial_distance <= self.config.stop_distance_m:
+                        stop["turn"] += 1
+                        nearest["turn"] = min(nearest["turn"], radial_distance)
                 if distance < self.config.min_range_m:
                     continue
                 if distance <= 4.0:
@@ -128,28 +138,38 @@ class LidarGuard:
             self._total_scan_points = total_scan_points
             self._error = (None if total_scan_points >= self.config.minimum_scan_points
                            else f"only {total_scan_points} finite scan points")
-            for direction in ("front", "rear"):
+            for direction in ("front", "rear", "turn"):
                 is_blocked = stop[direction] >= self.config.blocked_point_count
                 if is_blocked:
-                    self._blocked[direction] = True
                     self._clear_since[direction] = None
+                    since = self._blocking_since[direction]
+                    if since is None:
+                        self._blocking_since[direction] = now
+                    elif now - since >= self.config.block_confirm_s:
+                        self._blocked[direction] = True
                 elif self._blocked[direction]:
+                    self._blocking_since[direction] = None
                     since = self._clear_since[direction]
                     if since is None:
                         self._clear_since[direction] = now
                     elif now - since >= self.config.clear_hold_s:
                         self._blocked[direction] = False
                 else:
+                    self._blocking_since[direction] = None
                     self._clear_since[direction] = now
 
     def state(self, direction: str) -> GuardState:
-        if direction not in ("front", "rear"):
-            raise ValueError("direction must be front or rear")
+        if direction not in ("front", "rear", "turn"):
+            raise ValueError("direction must be front, rear, or turn")
         now = self._clock()
         with self._lock:
             if self._error or self._last_scan_at is None or now - self._last_scan_at > self.config.stale_after_s:
                 return GuardState.STALE
-            return GuardState.BLOCKED if self._blocked[direction] else GuardState.CLEAR
+            if self._blocked[direction]:
+                return GuardState.BLOCKED
+            if self._blocking_since[direction] is not None:
+                return GuardState.CONFIRMING
+            return GuardState.CLEAR
 
     def snapshot(self) -> dict[str, object]:
         now = self._clock()
@@ -175,6 +195,7 @@ class LidarGuard:
         result["sensor_health"] = "READY" if sensor_ready else ("STALE" if age is None or age > self.config.stale_after_s else "INVALID")
         result["front_state"] = self.state("front").value
         result["rear_state"] = self.state("rear").value
+        result["turn_state"] = self.state("turn").value
         result["front_ready"] = sensor_ready
         result["rear_ready"] = bool(age is not None and age <= self.config.stale_after_s and not result["error"] and result["coverage_points"]["rear"] >= self.config.ready_point_count)
         return result

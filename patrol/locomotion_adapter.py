@@ -8,7 +8,6 @@ import json
 import socket
 import math
 
-
 MAX_SPEED_M_S = 0.30
 
 
@@ -16,7 +15,11 @@ class UdpLocomotionAdapter:
     """Send heartbeat velocity/stop commands to the G1-side relay."""
 
     def __init__(self, host: str = "10.42.0.76", port: int = 47622,
-                 telemetry_bind: str = "10.42.0.1", telemetry_port: int = 47623):
+                 telemetry_bind: str = "10.42.0.1", telemetry_port: int = 47623,
+                 max_forward_speed: float = MAX_SPEED_M_S):
+        if max_forward_speed not in (0.30, 0.50):
+            raise ValueError("max forward speed must be 0.30 or 0.50 m/s")
+        self._max_forward_speed = max_forward_speed
         self._destination = (host, port)
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._seq = 0
@@ -65,8 +68,10 @@ class UdpLocomotionAdapter:
 
     def move(self, vx: float, vyaw: float = 0.0) -> None:
         vx = float(vx)
-        if not -MAX_SPEED_M_S <= vx <= MAX_SPEED_M_S:
-            raise ValueError(f"vx must be within +/-{MAX_SPEED_M_S:.2f} m/s")
+        if not -self._max_forward_speed <= vx <= self._max_forward_speed:
+            raise ValueError(
+                f"vx must be within +/-{self._max_forward_speed:.2f} m/s"
+            )
         vyaw = float(vyaw)
         if not -0.50 <= vyaw <= 0.50:
             raise ValueError("vyaw must be within +/-0.50 rad/s")

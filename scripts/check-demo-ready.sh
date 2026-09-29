@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=/home/ubuntu/dev/g1-bottle-reaction
-target=${G1_SSH_TARGET:-unitree@10.42.0.76}
+target=${G1_SSH_TARGET:?Set G1_SSH_TARGET to the currently routed G1 session}
 control=${G1_SSH_CONTROL:-$root/.runtime/usb-camera-ssh/wifi-control}
 remote_root=/tmp/motiondecode-current
 socket_path=/tmp/motiondecode-reaction.sock
@@ -34,7 +34,15 @@ if [[ ${1:-} == --dry-run ]]; then
   exit 0
 fi
 
-ip -4 addr show dev wlp128s20f3 | grep -F '10.42.0.1/24' >/dev/null
+host=${target##*@}
+route=$(ip -j route get "$host")
+ROUTE=$route "$python" -B - <<'PY'
+import json, os
+routes = json.loads(os.environ['ROUTE'])
+if len(routes) != 1 or not routes[0].get('dev') or not routes[0].get('prefsrc'):
+    raise SystemExit('G1 route is not uniquely resolved')
+print(f"G1_ROUTE_READY interface={routes[0]['dev']} local={routes[0]['prefsrc']}")
+PY
 command -v nvidia-smi >/dev/null
 timeout 2 nvidia-smi -L | grep -F 'GPU 0:' >/dev/null
 [[ -S $control ]] || { echo "SSH ControlMaster socket is missing: $control" >&2; exit 2; }

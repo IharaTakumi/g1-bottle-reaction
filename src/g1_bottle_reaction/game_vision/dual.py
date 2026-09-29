@@ -256,6 +256,20 @@ def validate_args(args):
             raise ValueError(
                 "--allow-hackathon-joy is restricted to plushie-capable targets"
             )
+    if args.allow_safe_return_miss_resume:
+        if (not args.patrol_control_socket or args.robot != "motiondecode"
+                or not args.enable_real_robot or not args.confirm_site_ready):
+            raise ValueError(
+                "--allow-safe-return-miss-resume requires attended real "
+                "MotionDecode with a Patrol interlock"
+            )
+    if args.hackathon_runtime:
+        if (not args.patrol_control_socket or args.robot != "motiondecode"
+                or not args.enable_real_robot or not args.confirm_site_ready):
+            raise ValueError(
+                "--hackathon-runtime requires attended real MotionDecode "
+                "with a Patrol interlock"
+            )
     if args.execute_real_action and args.robot != "g1-ssh":
         raise ValueError("--execute-real-action is restricted to --robot g1-ssh")
     if any((args.publish_processed, args.publish_safety, args.vision_preset, args.fog_mode,
@@ -465,6 +479,7 @@ def run(args):
                     socket_path=args.motiondecode_socket,
                     allow_hackathon_joy=args.allow_hackathon_joy,
                     fallback=MockRobotAdapter(),
+                    hackathon_runtime=args.hackathon_runtime,
                 )
             else:
                 robot = MockRobotAdapter()
@@ -503,6 +518,10 @@ def run(args):
                     10.0 if patrol is not None else (5.0 if wander is not None else 0.)
                 ),
                 reaction_completion_timeout=args.motiondecode_timeout + 5.0,
+                allow_safe_return_miss_resume=(
+                    args.allow_safe_return_miss_resume or args.hackathon_runtime
+                ),
+                hackathon_runtime=args.hackathon_runtime,
             )
             print(f"FOUND REACTION: robot={args.robot}, output={found_settings.output}, "
                   f"motion=notice, files={len(found_settings.sounds)}, "
@@ -622,15 +641,26 @@ def run(args):
                         max_age=plushie_gate.grace,
                     )
                     busy = reaction.busy or bool(reaction.audio_error)
+                    contexts = (
+                        {name: patrol.reaction_context(name)
+                         for name in ("person", "banana", "plushie")}
+                        if patrol is not None and args.hackathon_runtime else {}
+                    )
+                    inhibited = {
+                        name for name, value in contexts.items()
+                        if not value.get("eligible")
+                    }
+                    for name, target_gate in (
+                        ("person", gate), ("banana", banana_gate),
+                        ("plushie", plushie_gate),
+                    ):
+                        if name in inhibited:
+                            target_gate.suspend()
                     trigger = select_audio_trigger(
-                        detection,
-                        now,
-                        gate,
-                        banana_gate,
-                        plushie_gate,
-                        audio_busy=busy,
-                        plushie_result=plushie_detection,
+                        detection, now, gate, banana_gate, plushie_gate,
+                        audio_busy=busy, plushie_result=plushie_detection,
                         reaction_target=args.reaction_target,
+                        inhibited_targets=inhibited,
                     )
                     if trigger == "person":
                         if reaction.trigger(trigger, now):

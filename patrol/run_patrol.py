@@ -17,11 +17,16 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from lidar_guard import GuardState, LidarGuard
+from lidar_guard import GuardConfig, GuardState, LidarGuard
 from locomotion_adapter import DryRunLocomotionAdapter, UdpLocomotionAdapter
 from patrol_controller import PatrolConfig, PatrolController
 from control_ipc import PatrolControlServer
 from udp_relay_guard import UdpRelayGuard
+from hackathon_profile import (
+    FORWARD_SPEED_M_S as HACKATHON_FORWARD_SPEED_M_S,
+    LIDAR_STOP_DISTANCE_M as HACKATHON_LIDAR_STOP_DISTANCE_M,
+    TELEMETRY_RECOVERY_S as HACKATHON_TELEMETRY_RECOVERY_S,
+)
 
 CLOUD_TOPIC = "rt/utlidar/cloud_livox_mid360"
 
@@ -32,11 +37,19 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--network-interface", default="enp129s0")
     value.add_argument("--seconds", type=float, default=10.0, help="stationary LiDAR observation time")
     value.add_argument("--lidar-source", choices=("relay", "direct"), default="relay")
+    value.add_argument("--lidar-stop-distance", type=float, choices=(0.50, 0.80),
+                       default=0.80)
     value.add_argument("--relay-bind", default="10.42.0.1")
     value.add_argument("--relay-port", type=int, default=47621)
     value.add_argument("--locomotion-relay-host", default="10.42.0.76")
     value.add_argument("--locomotion-relay-port", type=int, default=47622)
+    value.add_argument("--locomotion-telemetry-bind", default="10.42.0.1")
     value.add_argument("--forward-speed", type=float, default=0.30)
+    value.add_argument("--max-forward-speed", type=float, choices=(0.30, 0.50),
+                       default=0.30)
+    value.add_argument("--telemetry-recovery-timeout", type=float,
+                       choices=(1.0, 2.0), default=1.0)
+    value.add_argument("--hackathon-runtime", action="store_true")
     value.add_argument("--forward-distance", type=float, default=2.0)
     value.add_argument("--return-distance", type=float, default=4.0)
     value.add_argument("--home-distance", type=float, default=2.0)
@@ -59,8 +72,15 @@ def parser() -> argparse.ArgumentParser:
 
 
 def config(args) -> PatrolConfig:
-    if not 0 < args.forward_speed <= 0.30:
-        raise ValueError("forward speed must be in (0, 0.30]")
+    if args.hackathon_runtime:
+        args.forward_speed = HACKATHON_FORWARD_SPEED_M_S
+        args.max_forward_speed = HACKATHON_FORWARD_SPEED_M_S
+        args.lidar_stop_distance = HACKATHON_LIDAR_STOP_DISTANCE_M
+        args.telemetry_recovery_timeout = HACKATHON_TELEMETRY_RECOVERY_S
+    if not 0 < args.forward_speed <= args.max_forward_speed:
+        raise ValueError(
+            f"forward speed must be in (0, {args.max_forward_speed:.2f}]"
+        )
     if args.forward_distance <= 0 or args.return_distance <= 0 or args.home_distance <= 0:
         raise ValueError("distances must be positive")
     if not 0 < abs(args.turn_yaw_rate) <= 0.50:
@@ -88,6 +108,9 @@ def config(args) -> PatrolConfig:
         heading_kp=args.heading_kp,
         heading_max_yaw_rad_s=args.heading_max_yaw,
         heading_deadband_rad=math.radians(args.heading_deadband_deg),
+        telemetry_recovery_s=args.telemetry_recovery_timeout,
+        transport_stale_s=0.20,
+        hackathon_runtime=args.hackathon_runtime,
     )
 
 
@@ -184,7 +207,10 @@ def dry_run(args) -> int:
 
 def observe_lidar(args):
     if args.lidar_source == "relay":
-        guard = UdpRelayGuard(args.relay_bind, args.relay_port)
+        guard = UdpRelayGuard(
+            args.relay_bind, args.relay_port,
+            expected_stop_distance_m=args.lidar_stop_distance,
+        )
         deadline = time.monotonic() + args.seconds
         while time.monotonic() < deadline:
             time.sleep(0.1)
@@ -202,7 +228,7 @@ def observe_lidar(args):
         print("LIDAR RATE: %.2f Hz" % normalized["rate_hz"])
         print("RELAY RATE: %.2f Hz" % report["relay_rate_hz"])
         return guard, guard, normalized
-    guard = LidarGuard()
+    guard = LidarGuard(GuardConfig(stop_distance_m=args.lidar_stop_distance))
     source = DDSLidarSource(args.network_interface, guard)
     try:
         deadline = time.monotonic() + args.seconds
@@ -245,7 +271,12 @@ def main(argv=None) -> int:
     if conflicts:
         source.close()
         raise RuntimeError("writer ownership conflict: " + "; ".join(conflicts))
-    loco = UdpLocomotionAdapter(args.locomotion_relay_host, args.locomotion_relay_port)
+    loco = UdpLocomotionAdapter(
+        args.locomotion_relay_host,
+        args.locomotion_relay_port,
+        telemetry_bind=args.locomotion_telemetry_bind,
+        max_forward_speed=args.max_forward_speed,
+    )
     control = None
     try:
         controller = PatrolController(loco, guard, config(args))

@@ -11,6 +11,9 @@ import time
 from lidar_guard import GuardState
 
 TRANSPORT_RECOVERY_S = 1.0
+ODOM_SOURCE_RECOVERY_S = 2.0
+LIDAR_RECOVERY_S = 2.0
+LIDAR_BLOCKED_RECOVERY_S = 10.0
 
 
 class PatrolState(str, Enum):
@@ -36,18 +39,22 @@ class PatrolConfig:
     turn_stop_at_rad: float = math.radians(177.0)
     max_turn_duration_s: float = 20.0
     imu_stale_s: float = 0.20
+    transport_stale_s: float = 0.20
     settle_s: float = 0.20
     command_period_s: float = 0.10
     distance_tolerance_m: float = 0.05
     slow_distance_m: float = 0.30
     slow_forward_speed_m_s: float = 0.10
     odom_stale_s: float = 0.50
-    odom_jump_m: float = 1.0
+    max_physical_speed_m_s: float = 0.50
+    odom_jump_margin_m: float = 0.15
     max_lateral_drift_m: float = 0.80
     heading_hold: bool = True
     heading_kp: float = 0.8
     heading_max_yaw_rad_s: float = 0.12
     heading_deadband_rad: float = math.radians(2.0)
+    telemetry_recovery_s: float = TRANSPORT_RECOVERY_S
+    hackathon_runtime: bool = False
 
 
 class PatrolController:
@@ -73,6 +80,7 @@ class PatrolController:
         self._turn_progress_rad: float | None = None
         self._turn_remaining_rad: float | None = None
         self._last_stop_sent_monotonic: float | None = None
+        self._forward_leg_id = 0
 
     def pause(self) -> None:
         self._pause_requested.set()
@@ -158,6 +166,7 @@ class PatrolController:
                 "turn_progress_rad": self._turn_progress_rad,
                 "turn_remaining_rad": self._turn_remaining_rad,
                 "stop_sent_monotonic": self._last_stop_sent_monotonic,
+                "forward_leg_id": self._forward_leg_id,
             }
 
     def run(self, cycles: int | None = 1) -> None:
@@ -214,6 +223,8 @@ class PatrolController:
             raise ValueError("forward distance and speed must be positive")
         self._active_state = state
         self.state = state
+        self._forward_leg_id += 1
+        self._checkpoint_reaction_pause()
         start = self._wait_for_odom()
         start_x, start_y, start_yaw = (float(start["odom_x"]), float(start["odom_y"]),
                                        float(start["odom_yaw"]))
@@ -221,6 +232,7 @@ class PatrolController:
         target_yaw = float(imu["yaw"])
         previous_imu_yaw = target_yaw
         previous_x, previous_y = start_x, start_y
+        previous_odom_at = self.clock()
         was_moving = False
         max_lateral = 0.0
         heading_error_sum = 0.0
@@ -232,12 +244,25 @@ class PatrolController:
         while True:
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped")
+            self._checkpoint_reaction_pause()
             sample = self._require_odom()
             x, y = float(sample["odom_x"]), float(sample["odom_y"])
-            if math.hypot(x - previous_x, y - previous_y) > self.config.odom_jump_m:
+            now = self.clock()
+            sample_interval = min(
+                max(0.0, now - previous_odom_at), self.config.odom_stale_s
+            )
+            jump_limit = (
+                self.config.max_physical_speed_m_s * sample_interval
+                + self.config.odom_jump_margin_m
+            )
+            if math.hypot(x - previous_x, y - previous_y) > jump_limit:
                 self._send_stop()
-                raise RuntimeError("FORWARD FAILED: unnatural odom jump")
+                raise RuntimeError(
+                    "FORWARD FAILED: unnatural odom jump exceeds dynamic limit "
+                    f"{jump_limit:.3f}m for dt={sample_interval:.3f}s"
+                )
             previous_x, previous_y = x, y
+            previous_odom_at = now
             imu = self._require_imu()
             current_yaw = float(imu["yaw"])
             yaw_delta = wrap_to_pi(current_yaw - previous_imu_yaw)
@@ -278,10 +303,12 @@ class PatrolController:
                 return
             guard_state = self.guard.state("front")
             if guard_state is GuardState.STALE:
-                self._send_stop()
-                raise RuntimeError("FORWARD FAILED: LiDAR guard stale")
-            if self._pause_requested.is_set() and not self._paused.is_set():
-                self._activate_pause(self._pause_reason or "reaction")
+                guard_state = self._recover_lidar_guard("FORWARD")
+            if guard_state is GuardState.BLOCKED:
+                if not self.config.hackathon_runtime:
+                    self._send_stop()
+                    raise RuntimeError("FORWARD FAILED: LiDAR obstacle BLOCKED")
+                guard_state, _ = self._recover_lidar_blocked("FORWARD")
             if not self._paused.is_set() and guard_state is GuardState.CLEAR:
                 if not was_moving:
                     self.emit(f"[guard] CLEAR -> RESUME remaining={remaining:.3f}m")
@@ -299,18 +326,17 @@ class PatrolController:
     def _require_odom(self):
         sample = self.locomotion.odom_sample()
         if not self._odom_source_healthy(sample):
-            self.emit("[patrol] ODOM SOURCE STALE -> FINAL STOP")
-            self._emit_odom_diagnostic(sample)
-            self._send_stop()
-            raise RuntimeError("FORWARD FAILED: odometry stale or invalid")
+            return self._recover_odom_source(sample)
         if not self._transport_is_fresh(sample):
             return self._recover_transport("ODOM", sample)
         return sample
 
-    def _wait_for_odom(self, context: str = "FORWARD"):
-        deadline = self.clock() + 2.0
+    def _wait_for_odom(self, context: str = "FORWARD", *, abort_on_stop=False):
+        deadline = self.clock() + ODOM_SOURCE_RECOVERY_S
         sample = None
         while self.clock() < deadline:
+            if abort_on_stop and self._stop.is_set():
+                raise RuntimeError("patrol stopped during odometry recovery")
             sample = self.locomotion.odom_sample()
             if self._odom_is_fresh(sample):
                 return sample
@@ -321,23 +347,57 @@ class PatrolController:
             f"{context} FAILED: fresh odometry not received within 2.0s"
         )
 
+    def _recover_odom_source(self, sample):
+        self._send_stop()
+        self._recovering_telemetry.set()
+        started = self.clock()
+        self.emit(
+            "[patrol] ODOM SOURCE STALE -> STOP; waiting up to 2.0s "
+            f"odom_age={None if sample is None else sample.get('odom_age')}"
+        )
+        recovered = False
+        try:
+            try:
+                latest = self._wait_for_odom(
+                    "ODOM SOURCE RECOVERY", abort_on_stop=True
+                )
+            except Exception:
+                if self._stop.is_set():
+                    self.emit("[patrol] ODOM SOURCE RECOVERY ABORTED -> FINAL STOP")
+                else:
+                    self.emit("[patrol] ODOM SOURCE RECOVERY TIMEOUT -> FINAL STOP")
+                raise
+            elapsed = max(0.0, self.clock() - started)
+            self.emit(
+                "[patrol] ODOM SOURCE RECOVERED -> RESUME "
+                f"recovery_time={elapsed:.3f}s"
+            )
+            recovered = True
+            return latest
+        finally:
+            self._recovering_telemetry.clear()
+            if (recovered and self._pause_requested.is_set()
+                    and not self._paused.is_set()):
+                self._activate_pause(self._pause_reason or "reaction")
+
     def _run_turn(self, state: PatrolState, target: float) -> None:
         vyaw = self.config.turn_yaw_rate_rad_s
         if target <= 0 or not 0 < abs(vyaw) <= 0.50:
             raise ValueError("turn angle and yaw rate must be within limits")
         self._active_state = state
         self.state = state
+        self._checkpoint_reaction_pause()
         sample = self._wait_for_imu()
         previous = float(sample["yaw"])
         accumulated = 0.0
         direction = 1.0 if vyaw > 0 else -1.0
         started = self.clock()
-        pause_started = None
         moving = False
         self.emit(f"[patrol] {state.value} target={target:.3f}rad IMU closed-loop")
         while direction * accumulated < self.config.turn_stop_at_rad:
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped")
+            started += self._checkpoint_reaction_pause()
             sample = self._require_imu()
             current = float(sample["yaw"])
             delta = wrap_to_pi(current - previous)
@@ -352,21 +412,15 @@ class PatrolController:
                 self._turn_remaining_rad = max(
                     0.0, self.config.turn_stop_at_rad - progress
                 )
-            guard_state = self.guard.state("front")
+            guard_state = self.guard.state("turn")
             if guard_state is GuardState.STALE:
-                self._send_stop()
-                raise RuntimeError("TURN FAILED: LiDAR guard stale")
-            if self._paused.is_set():
-                if pause_started is None:
-                    pause_started = self.clock()
-                if moving:
+                guard_state = self._recover_lidar_guard("TURN")
+            if guard_state is GuardState.BLOCKED:
+                if not self.config.hackathon_runtime:
                     self._send_stop()
-                moving = False
-                self.sleep(self.config.command_period_s)
-                continue
-            if pause_started is not None:
-                started += self.clock() - pause_started
-                pause_started = None
+                    raise RuntimeError("TURN FAILED: LiDAR obstacle BLOCKED")
+                guard_state, recovery_s = self._recover_lidar_blocked("TURN")
+                started += recovery_s
             if self.clock() - started > self.config.max_turn_duration_s:
                 self._send_stop()
                 raise RuntimeError("TURN FAILED: max turn duration exceeded")
@@ -383,6 +437,8 @@ class PatrolController:
     def _require_imu(self):
         sample = self.locomotion.imu_sample()
         if not self._imu_source_healthy(sample):
+            if self.config.hackathon_runtime:
+                return self._recover_imu_source(sample)
             self.emit("[patrol] IMU SOURCE STALE -> FINAL STOP")
             self._emit_imu_diagnostic(sample)
             self._send_stop()
@@ -390,6 +446,40 @@ class PatrolController:
         if not self._transport_is_fresh(sample):
             return self._recover_transport("IMU", sample)
         return sample
+
+    def _recover_imu_source(self, sample):
+        self._send_stop()
+        self._recovering_telemetry.set()
+        started = self.clock()
+        self.emit(
+            "[patrol] IMU SOURCE STALE -> STOP; waiting up to 2.0s "
+            f"imu_age={None if sample is None else sample.get('imu_age')}"
+        )
+        recovered = False
+        try:
+            deadline = started + 2.0
+            latest = sample
+            while self.clock() < deadline:
+                if self._stop.is_set():
+                    raise RuntimeError("patrol stopped during IMU recovery")
+                latest = self.locomotion.imu_sample()
+                if self._imu_is_fresh(latest):
+                    recovered = True
+                    self.emit(
+                        "[patrol] IMU SOURCE RECOVERED -> RESUME "
+                        f"recovery_time={max(0.0, self.clock() - started):.3f}s"
+                    )
+                    return latest
+                self.sleep(.02)
+            self._emit_imu_diagnostic(latest)
+            raise RuntimeError(
+                "IMU SOURCE RECOVERY FAILED: fresh IMU not received within 2.0s"
+            )
+        finally:
+            self._recovering_telemetry.clear()
+            if (recovered and self._pause_requested.is_set()
+                    and not self._paused.is_set()):
+                self._activate_pause(self._pause_reason or "reaction")
 
     def _wait_for_imu(self, context: str = "TURN"):
         deadline = self.clock() + 2.0
@@ -447,7 +537,7 @@ class PatrolController:
             age = float(sample.get("transport_age"))
         except (AttributeError, TypeError, ValueError):
             return False
-        return math.isfinite(age) and age <= self.config.imu_stale_s
+        return math.isfinite(age) and age <= self.config.transport_stale_s
 
     def _recover_transport(self, source: str, sample):
         self._send_stop()
@@ -468,17 +558,22 @@ class PatrolController:
         )
         recovered = False
         try:
-            deadline = started + TRANSPORT_RECOVERY_S
+            deadline = started + self.config.telemetry_recovery_s
             while self.clock() < deadline:
                 if self._stop.is_set():
                     raise RuntimeError("patrol stopped during telemetry recovery")
                 latest = get_sample()
                 if not source_healthy(latest):
+                    if source == "ODOM":
+                        latest = self._recover_odom_source(latest)
+                        recovered = True
+                        return latest
+                    if self.config.hackathon_runtime:
+                        latest = self._recover_imu_source(latest)
+                        recovered = True
+                        return latest
                     self.emit(f"[patrol] {source} SOURCE STALE -> FINAL STOP")
-                    if source == "IMU":
-                        self._emit_imu_diagnostic(latest)
-                    else:
-                        self._emit_odom_diagnostic(latest)
+                    self._emit_imu_diagnostic(latest)
                     raise RuntimeError(f"{source} source became stale during recovery")
                 if self._transport_is_fresh(latest):
                     elapsed = max(0.0, self.clock() - started)
@@ -496,7 +591,7 @@ class PatrolController:
             )
             raise RuntimeError(
                 f"{source} telemetry transport did not recover within "
-                f"{TRANSPORT_RECOVERY_S:.1f}s"
+                f"{self.config.telemetry_recovery_s:.1f}s"
             )
         finally:
             self._recovering_telemetry.clear()
@@ -553,18 +648,84 @@ class PatrolController:
         self._pause_acknowledged.set()
         self.emit(f"[patrol] PAUSED reason={reason}")
 
-    def _checkpoint_reaction_pause(self) -> None:
+    def _checkpoint_reaction_pause(self) -> float:
         if self._pause_requested.is_set() and not self._paused.is_set():
             self._activate_pause(self._pause_reason or "reaction")
+        paused_at = self.clock() if self._paused.is_set() else None
         while self._paused.is_set():
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped")
-            self._require_odom()
-            self._require_imu()
             if self.guard.state("front") is GuardState.STALE:
-                self._send_stop()
-                raise RuntimeError("PAUSE FAILED: LiDAR guard stale")
+                self._recover_lidar_guard("PAUSE")
             self.sleep(self.config.command_period_s)
+        return 0.0 if paused_at is None else max(0.0, self.clock() - paused_at)
+
+    def _recover_lidar_guard(self, context: str) -> GuardState:
+        self._send_stop()
+        started = self.clock()
+        deadline = started + LIDAR_RECOVERY_S
+        self.emit(
+            f"[patrol] LIDAR STALE -> STOP; waiting up to "
+            f"{LIDAR_RECOVERY_S:.1f}s context={context}"
+        )
+        while self.clock() < deadline:
+            if self._stop.is_set():
+                raise RuntimeError("patrol stopped during LiDAR recovery")
+            direction = "turn" if context == "TURN" else "front"
+            state = self.guard.state(direction)
+            if state is not GuardState.STALE:
+                self.emit(
+                    f"[patrol] LIDAR RECOVERED state={state.value} "
+                    f"recovery_time={max(0.0, self.clock() - started):.3f}s"
+                )
+                return state
+            self.sleep(0.02)
+        self._send_stop()
+        self.emit("[patrol] LIDAR RECOVERY TIMEOUT -> FINAL STOP")
+        raise RuntimeError(
+            f"{context} FAILED: LiDAR guard did not recover within "
+            f"{LIDAR_RECOVERY_S:.1f}s"
+        )
+
+    def _recover_lidar_blocked(self, context: str) -> tuple[GuardState, float]:
+        self._send_stop()
+        self._recovering_telemetry.set()
+        started = self.clock()
+        deadline = started + LIDAR_BLOCKED_RECOVERY_S
+        self.emit(
+            "[patrol] LIDAR BLOCKED -> RECOVERABLE_STOP; waiting up to "
+            f"{LIDAR_BLOCKED_RECOVERY_S:.1f}s context={context}"
+        )
+        try:
+            while self.clock() < deadline:
+                if self._stop.is_set():
+                    raise RuntimeError("operator abort during LiDAR BLOCKED recovery")
+                direction = "turn" if context == "TURN" else "front"
+                state = self.guard.state(direction)
+                if state is GuardState.STALE:
+                    state = self._recover_lidar_guard(context)
+                if state is GuardState.CLEAR:
+                    self._wait_for_fresh_telemetry("LIDAR BLOCKED RECOVERY")
+                    if self._stop.is_set():
+                        raise RuntimeError("operator abort during LiDAR BLOCKED recovery")
+                    if self.guard.state(direction) is not GuardState.CLEAR:
+                        self.sleep(.02)
+                        continue
+                    elapsed = max(0.0, self.clock() - started)
+                    self.emit(
+                        "[patrol] LIDAR BLOCKED RECOVERED -> RESUME "
+                        f"context={context} recovery_time={elapsed:.3f}s"
+                    )
+                    return GuardState.CLEAR, elapsed
+                self.sleep(.02)
+            self._send_stop()
+            self.emit("[patrol] LIDAR BLOCKED RECOVERY TIMEOUT -> FINAL STOP")
+            raise RuntimeError(
+                "HARD_FAULT: LiDAR obstacle BLOCKED recovery timeout after "
+                f"{LIDAR_BLOCKED_RECOVERY_S:.1f}s"
+            )
+        finally:
+            self._recovering_telemetry.clear()
 
     def _send_move(self, vx: float, vyaw: float) -> bool:
         with self._motion_lock:

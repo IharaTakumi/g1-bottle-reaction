@@ -161,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--motiondecode-socket", default="/tmp/motiondecode-reaction.sock"
     )
-    parser.add_argument("--motiondecode-timeout", type=float, default=420.0)
+    parser.add_argument("--motiondecode-timeout", type=float, default=30.0)
     parser.add_argument(
         "--confirm-site-ready",
         action="store_true",
@@ -174,6 +174,18 @@ def build_parser() -> argparse.ArgumentParser:
             "explicit attended-only gate for real plushie JOY; does not change "
             "global MotionDecode validation metadata"
         ),
+    )
+    parser.add_argument(
+        "--allow-safe-return-miss-resume",
+        action="store_true",
+        help=(
+            "attended hackathon opt-in: resume Patrol only after a typed "
+            "MotionDecode safe-return miss with a fully safe resident postflight"
+        ),
+    )
+    parser.add_argument(
+        "--hackathon-runtime", action="store_true",
+        help="attended runtime policy with bounded recoverable-stop handling",
     )
     parser.add_argument("--g1-stream-host", help="PC2 host publishing processed game images")
     parser.add_argument("--g1-stream-port", type=int, help="processed TeleImager ZMQ port")

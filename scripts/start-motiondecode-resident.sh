@@ -3,9 +3,8 @@ set -euo pipefail
 
 # Start only the already-provisioned, historically validated PC2 runtime.
 # This script deliberately never installs, rsyncs, or searches for Python.
-target=${G1_SSH_TARGET:-unitree@10.42.0.76}
+target=${G1_SSH_TARGET:?Set G1_SSH_TARGET to the currently routed G1 session}
 control=${G1_SSH_CONTROL:-/home/ubuntu/dev/g1-bottle-reaction/.runtime/usb-camera-ssh/wifi-control}
-expected_arm_pid=${MOTIONDECODE_EXPECTED_ARM_PID:-2807}
 remote_root=/tmp/motiondecode-current
 remote_python=/usr/bin/python3
 dependency_root=/tmp/motiondecode-hold-deps
@@ -17,15 +16,11 @@ if [[ ${1:-} == --dry-run ]]; then
   printf '%s\n' "TARGET=$target"
   printf '%s\n' "PYTHON=$remote_python"
   printf '%s\n' "PYTHONPATH=$dependency_root:$remote_root/scripts:/home/unitree/unitree_sdk2_python"
-  printf '%s\n' "EXPECTED_ARM_PID=$expected_arm_pid"
+  printf '%s\n' "EXPECTED_ARM_PID=resolved from strict runtime identity probe"
   printf '%s\n' "REACTIONS=found,surprise"
   exit 0
 fi
 
-[[ $expected_arm_pid =~ ^[1-9][0-9]*$ ]] || {
-  echo "MOTIONDECODE_EXPECTED_ARM_PID must be a positive integer" >&2
-  exit 2
-}
 [[ -S $control ]] || {
   echo "SSH ControlMaster socket is missing: $control" >&2
   exit 2
@@ -34,14 +29,13 @@ fi
 ssh_base=(ssh -T -o BatchMode=yes -o ConnectTimeout=3 -S "$control" -- "$target")
 "${ssh_base[@]}" /bin/bash -s -- \
   "$remote_root" "$remote_python" "$dependency_root" "$socket_path" \
-  "$log_path" "$expected_arm_pid" <<'REMOTE'
+  "$log_path" <<'REMOTE'
 set -euo pipefail
 root=$1
 python=$2
 deps=$3
 socket=$4
 log=$5
-expected_pid=$6
 export PYTHONPATH="$deps:$root/scripts:/home/unitree/unitree_sdk2_python"
 export LD_LIBRARY_PATH="/home/unitree/work/unitree_sdk2/thirdparty/lib/aarch64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
@@ -101,9 +95,9 @@ test -f "$ownership_report" || {
   echo "ARM PID READ-ONLY PROBE FAILED (exit $probe_rc; no report)" >&2
   exit 11
 }
-"$python" -B - "$ownership_report" "$expected_pid" <<'PY'
+expected_pid=$("$python" -B - "$ownership_report" <<'PY'
 import json, sys
-report_path, asserted_pid = sys.argv[1:]
+report_path = sys.argv[1]
 data = json.load(open(report_path))
 publishers = data.get('topics', {}).get('rt/arm_sdk', {}).get('publishers', [])
 required_publications = {'rt/api/arm/response', 'rt/api/sport/request',
@@ -122,8 +116,8 @@ candidates = [
 if len(candidates) != 1:
     raise SystemExit(f'ARM PID AMBIGUOUS: expected exactly one strict candidate, got {len(candidates)}')
 observed_pid = str(candidates[0].get('pid'))
-if observed_pid != asserted_pid:
-    raise SystemExit(f'ARM PID MISMATCH: configured={asserted_pid} observed={observed_pid}')
+if not observed_pid.isdigit() or int(observed_pid) <= 0:
+    raise SystemExit(f'ARM PID INVALID: {observed_pid!r}')
 if data.get('lowstate', {}).get('status') != 'PASS':
     raise SystemExit('ARM PID PROBE BLOCKED: LowState is not PASS')
 if data.get('lowstate', {}).get('stationary') != 'PASS':
@@ -131,8 +125,13 @@ if data.get('lowstate', {}).get('stationary') != 'PASS':
 action = data.get('topics', {}).get('rt/arm/action/state', {}).get('status_during_observation')
 if action != 'IDLE':
     raise SystemExit(f'ARM PID PROBE BLOCKED: Arm Action is {action}')
-print(f'ARM_PID_VERIFIED={observed_pid}')
+print(observed_pid)
 PY
+)
+case "$expected_pid" in
+  ''|*[!0-9]*) echo "ARM PID probe returned invalid identity: $expected_pid" >&2; exit 11;;
+esac
+printf 'ARM_PID_BOUND=%s\n' "$expected_pid"
 printf '%s\n' "$expected_pid" > /tmp/motiondecode-expected-arm-pid
 
 status_json() {
@@ -192,6 +191,7 @@ nohup env \
   LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
   "$python" -u scripts/resident_worker.py \
     --real --confirm-site-ready \
+    --hackathon-runtime \
     --network-interface eth0 \
     --expected-arm-pid "$expected_pid" \
     --lowstate-backend cyclonedds \

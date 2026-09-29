@@ -15,7 +15,9 @@ import yaml
 
 from g1_bottle_reaction.adapters.robot import RobotAdapter
 from g1_bottle_reaction.adapters.motiondecode_reaction import (
+    MotionDecodeRecoverableAbort,
     MotionDecodeSafeReturnMiss,
+    _resident_postflight_is_safe,
 )
 from g1_bottle_reaction.adapters.speech import SpeechBackend
 from g1_bottle_reaction.config.loader import ReactionConfig
@@ -53,6 +55,29 @@ class ConsoleWavOutput:
         pass
 
 
+class _OneShotAudioStartGate:
+    """Release one audio job after confirmed Patrol stationary readiness."""
+
+    def __init__(self) -> None:
+        self._released = threading.Event()
+        self._started = threading.Event()
+        self._cancelled = threading.Event()
+
+    def wait(self, timeout: float) -> bool:
+        if not self._released.wait(timeout) or self._cancelled.is_set():
+            return False
+        self._started.set()
+        return True
+
+    def release_and_wait_started(self, timeout: float) -> bool:
+        self._released.set()
+        return self._started.wait(timeout) and not self._cancelled.is_set()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        self._released.set()
+
+
 class FoundWavSpeechBackend(SpeechBackend):
     """Adapt existing reaction WAV files to ReactionEngine's speech boundary."""
 
@@ -61,18 +86,28 @@ class FoundWavSpeechBackend(SpeechBackend):
         self.error = ""
         self.last_attempt_successful: bool | None = None
         self._start_callback = None
+        self._start_gate = None
         self._callback_lock = threading.Lock()
 
     def set_start_callback(self, callback) -> None:
         with self._callback_lock:
             self._start_callback = callback
 
+    def set_start_gate(self, gate) -> None:
+        with self._callback_lock:
+            self._start_gate = gate
+
     def speak(self, text: str, *, voice_profile: str = "neutral") -> None:
         del voice_profile
         path = Path(text)
-        started = time.monotonic()
         with self._callback_lock:
             callback, self._start_callback = self._start_callback, None
+            gate, self._start_gate = self._start_gate, None
+        if gate is not None and not gate.wait(5.0):
+            self.last_attempt_successful = False
+            print(f"AUDIO START CANCELLED: {path}", flush=True)
+            return
+        started = time.monotonic()
         if callback is not None:
             callback(started)
         print(f"Audio triggered: {path}; monotonic={started:.6f}", flush=True)
@@ -147,6 +182,9 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
         self.error = ""
         self.last_attempt_successful: bool | None = None
         self.safe_return_miss = False
+        self.safe_return_miss_postflight_safe = False
+        self.recoverable_abort = False
+        self.recoverable_abort_postflight_safe = False
         self._before_motion = None
         self._motion_start_callback = None
         self._gate_lock = threading.Lock()
@@ -164,6 +202,9 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
     def play_motion(self, motion: str) -> None:
         self.last_attempt_successful = False
         self.safe_return_miss = False
+        self.safe_return_miss_postflight_safe = False
+        self.recoverable_abort = False
+        self.recoverable_abort_postflight_safe = False
         if self.error:
             print(
                 f"Motion reaction skipped: {motion} (disabled after previous error)",
@@ -194,10 +235,24 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
         except MotionDecodeSafeReturnMiss as exc:
             self.last_attempt_successful = True
             self.safe_return_miss = True
+            self.safe_return_miss_postflight_safe = _resident_postflight_is_safe(
+                exc.resident_status
+            )
             print(
                 "MOTION REACTION SAFE RETURN MISS: "
                 f"reaction={exc.reaction} returned_to_q0=false "
                 "motion disabled for this event only; "
+                "next reaction remains enabled",
+                flush=True,
+            )
+        except MotionDecodeRecoverableAbort as exc:
+            self.recoverable_abort = True
+            self.recoverable_abort_postflight_safe = _resident_postflight_is_safe(
+                exc.resident_status
+            )
+            print(
+                "MOTION REACTION RECOVERABLE ABORT: "
+                f"reaction={exc.reaction}; weight released; no retry; "
                 "next reaction remains enabled",
                 flush=True,
             )
@@ -212,6 +267,10 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
     def preflight_motion(self) -> bool:
         check = getattr(self.delegate, "preflight_motion", None)
         return True if check is None else bool(check())
+
+    def recover_after_timeout(self, timeout: float) -> bool:
+        check = getattr(self.delegate, "recover_after_timeout", None)
+        return False if check is None else bool(check(timeout))
 
     @property
     def last_preflight_error(self) -> str:
@@ -239,9 +298,11 @@ class FoundReactionController:
         speech_delay_overrides: dict[str, float] | None = None,
         wander=None,
         patrol=None,
-        reaction_completion_timeout: float = 430.0,
+        reaction_completion_timeout: float = 35.0,
         reaction_settle_seconds: float = 0.0,
         reaction_preflight_timeout: float = 0.0,
+        allow_safe_return_miss_resume: bool = False,
+        hackathon_runtime: bool = False,
         sleeper=time.sleep,
     ) -> None:
         if base_reaction.motion != "notice":
@@ -288,11 +349,15 @@ class FoundReactionController:
         self.reaction_completion_timeout = reaction_completion_timeout
         self.reaction_settle_seconds = float(reaction_settle_seconds)
         self.reaction_preflight_timeout = float(reaction_preflight_timeout)
+        self.allow_safe_return_miss_resume = bool(allow_safe_return_miss_resume)
+        self.hackathon_runtime = bool(hackathon_runtime)
         self.settings = dict(settings)
         self._sleep = sleeper
         self._closing = threading.Event()
         self._wander_lock = threading.Lock()
         self._completion_thread: threading.Thread | None = None
+        self._patrol_audio_gate: _OneShotAudioStartGate | None = None
+        self._reaction_leg_id: int | None = None
         self._timing_lock = threading.Lock()
         self._reaction_timing: dict[str, float | str] | None = None
 
@@ -396,9 +461,21 @@ class FoundReactionController:
         return decision.accepted
 
     def _trigger_patrol(self, name: str, now: float) -> bool:
+        context = self.patrol.reaction_context(name, force=True)
+        if not context.get("eligible"):
+            print(
+                f"{name.upper()} REACTION INHIBITED: Patrol phase/state "
+                f"phase={context.get('phase')} paused={context.get('paused')}",
+                flush=True,
+            )
+            return False
+        self._reaction_leg_id = int(context["forward_leg_id"])
         with self._timing_lock:
             self._reaction_timing = {"target": name, "t0": float(now)}
         self.speech.set_start_callback(self._record_audio_start)
+        audio_gate = _OneShotAudioStartGate() if name in {"banana", "plushie"} else None
+        self._patrol_audio_gate = audio_gate
+        self.speech.set_start_gate(audio_gate)
         self.robot.set_motion_gate(
             lambda: self._patrol_motion_gate(name), self._record_motion_start
         )
@@ -406,14 +483,19 @@ class FoundReactionController:
             FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
         )
         if not decision.accepted or decision.job is None:
+            self._reaction_leg_id = None
+            if audio_gate is not None:
+                audio_gate.cancel()
             self.speech.set_start_callback(None)
+            self.speech.set_start_gate(None)
             self.robot.clear_motion_gate()
             with self._timing_lock:
                 self._reaction_timing = None
             return False
         self._jobs.append(decision.job)
         print(
-            f"{name.upper()} REACTION EVENT: immediate audio + "
+            f"{name.upper()} REACTION EVENT: "
+            f"{'stop-gated audio + ' if audio_gate is not None else 'immediate audio + '}"
             f"stop-gated motion={decision.reaction.motion}; "
             f"confirmed_monotonic={now:.6f}",
             flush=True,
@@ -449,11 +531,17 @@ class FoundReactionController:
             with self._timing_lock:
                 if self._reaction_timing is not None:
                     self._reaction_timing["t3"] = stationary
+            gate = self._patrol_audio_gate
+            if gate is not None and not gate.release_and_wait_started(2.0):
+                raise RuntimeError("Patrol-gated audio did not start after stationary confirmation")
             print(
                 f"{name.upper()} ARMS STATIONARY: monotonic={stationary:.6f}",
                 flush=True,
             )
         except Exception as exc:
+            gate = self._patrol_audio_gate
+            if gate is not None:
+                gate.cancel()
             self.patrol.abort(str(exc))
             raise
 
@@ -468,6 +556,7 @@ class FoundReactionController:
                 self._reaction_timing["t4"] = stamp
 
     def _report_reaction_timing(self) -> None:
+        self._patrol_audio_gate = None
         with self._timing_lock:
             timing = dict(self._reaction_timing or {})
             self._reaction_timing = None
@@ -513,6 +602,19 @@ class FoundReactionController:
                 f"{name.upper()} REACTION TIMEOUT: {self.interlock_label} remains stopped",
                 flush=True,
             )
+            if (self.patrol is not None and self.hackathon_runtime
+                    and self.robot.recover_after_timeout(2.0)):
+                print(
+                    f"{name.upper()} RECOVERABLE_REACTION_ABORT: timeout with "
+                    "confirmed release and SAFE resident; Patrol resumed; no retry",
+                    flush=True,
+                )
+                try:
+                    self.interlock.start()
+                except Exception as exc:
+                    self.patrol.abort(str(exc))
+                self._report_reaction_timing()
+                return
             if self.patrol is not None:
                 self.patrol.abort("Reaction completion timeout")
                 self._report_reaction_timing()
@@ -523,7 +625,34 @@ class FoundReactionController:
             and self.speech.last_attempt_successful is True
         )
         if self.patrol is not None and self.robot.safe_return_miss:
-            successful = False
+            safe_miss_resume = (
+                self.allow_safe_return_miss_resume
+                and self.robot.safe_return_miss_postflight_safe
+            )
+            if safe_miss_resume:
+                print(
+                    f"{name.upper()} WARNING: attended hackathon override: "
+                    "typed MotionDecode safe-return miss with SAFE resident "
+                    "postflight; Patrol resume allowed",
+                    flush=True,
+                )
+            else:
+                successful = False
+        if self.patrol is not None and self.robot.recoverable_abort:
+            recoverable_resume = (
+                self.hackathon_runtime
+                and self.robot.recoverable_abort_postflight_safe
+                and self.speech.last_attempt_successful is True
+            )
+            if recoverable_resume:
+                successful = True
+                print(
+                    f"{name.upper()} RECOVERABLE_REACTION_ABORT: "
+                    "recovery barrier SAFE; Patrol resume allowed; no retry",
+                    flush=True,
+                )
+            else:
+                successful = False
         if not successful:
             print(
                 f"{name.upper()} REACTION FAILED/UNCERTAIN: "
@@ -534,6 +663,9 @@ class FoundReactionController:
                 self.patrol.abort("Reaction completion or q0 return was not confirmed")
                 self._report_reaction_timing()
             return
+        if self.patrol is not None and self._reaction_leg_id is not None:
+            self.patrol.mark_reaction_success(name, self._reaction_leg_id)
+            self._reaction_leg_id = None
         if self._closing.is_set():
             return
         try:
@@ -558,6 +690,8 @@ class FoundReactionController:
 
     def close(self) -> None:
         self._closing.set()
+        if self._patrol_audio_gate is not None:
+            self._patrol_audio_gate.cancel()
         try:
             if self.interlock is not None:
                 with self._wander_lock:
@@ -660,6 +794,7 @@ def select_audio_trigger(
     audio_busy=False,
     plushie_result=None,
     reaction_target="all",
+    inhibited_targets=frozenset(),
 ):
     """Choose at most one reaction in plushie, banana, person priority order."""
     plushie_result = result if plushie_result is None else plushie_result
@@ -679,19 +814,20 @@ def select_audio_trigger(
         )
     if reaction_target != "all":
         raise ValueError(f"Unknown reaction target: {reaction_target}")
-    if plushie_gate is not None and plushie_gate.update(
-            plushie_result, now, audio_busy=audio_busy):
+    if ("plushie" not in inhibited_targets and plushie_gate is not None
+            and plushie_gate.update(
+                plushie_result, now, audio_busy=audio_busy)):
         banana_gate.update(result, now, audio_busy=True, inhibit=True)
         person_gate.update(result, now, audio_busy=True, inhibit=True)
         return "plushie"
     plushie_visible = bool(plushie_result.plushies)
-    if banana_gate.update(
-            result, now, audio_busy=audio_busy, inhibit=plushie_visible):
+    if ("banana" not in inhibited_targets and banana_gate.update(
+            result, now, audio_busy=audio_busy, inhibit=plushie_visible)):
         person_gate.update(result, now, audio_busy=True, inhibit=True)
         return "banana"
-    if person_gate.update(
+    if ("person" not in inhibited_targets and person_gate.update(
             result, now, audio_busy=audio_busy,
-            inhibit=bool(plushie_visible or result.bananas)):
+            inhibit=bool(plushie_visible or result.bananas))):
         return "person"
     return None
 
@@ -728,6 +864,11 @@ class FoundGate:
     def clear_detection(self):
         self.start = self.last = None
         self.state = "SEARCHING"
+
+    def suspend(self):
+        """Freeze confirmation and re-arm while Patrol is ineligible."""
+        self.clear_detection()
+        self.clear_start = self.clear_last = None
 
     def update(self, result, now, *, audio_busy=False, inhibit=False):
         if now < self.until:

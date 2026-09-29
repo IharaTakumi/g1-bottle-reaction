@@ -12,9 +12,10 @@ from lidar_guard import GuardState
 
 class UdpRelayGuard:
     def __init__(self, bind: str, port: int, stale_timeout_s: float = 0.5,
-                 clock=time.monotonic):
+                 clock=time.monotonic, expected_stop_distance_m: float = 0.80):
         self._clock = clock
         self._stale_timeout = stale_timeout_s
+        self._expected_stop_distance = float(expected_stop_distance_m)
         self._lock = threading.Lock()
         self._last = None
         self._received_at = None
@@ -31,7 +32,9 @@ class UdpRelayGuard:
             try:
                 payload, _ = self._socket.recvfrom(65535)
                 message = json.loads(payload)
-                if not all(key in message for key in ("front_state", "rear_state", "scan_age", "sensor_health")):
+                if not all(key in message for key in (
+                        "front_state", "rear_state", "turn_state",
+                        "scan_age", "sensor_health")):
                     continue
                 received = self._clock()
                 with self._lock:
@@ -44,8 +47,8 @@ class UdpRelayGuard:
                 pass
 
     def state(self, direction: str) -> GuardState:
-        if direction not in ("front", "rear"):
-            raise ValueError("direction must be front or rear")
+        if direction not in ("front", "rear", "turn"):
+            raise ValueError("direction must be front, rear, or turn")
         with self._lock:
             message, received = self._last, self._received_at
         if message is None or received is None:
@@ -54,10 +57,15 @@ class UdpRelayGuard:
         scan_age = message.get("scan_age")
         if (relay_age > self._stale_timeout or scan_age is None
                 or float(scan_age) > self._stale_timeout
-                or message.get("sensor_health") != "READY"):
+                or message.get("sensor_health") != "READY"
+                or message.get("stop_distance_m") != self._expected_stop_distance):
             return GuardState.STALE
         value = message.get(f"{direction}_state")
-        return GuardState.CLEAR if value == "CLEAR" else GuardState.BLOCKED
+        if value == "CLEAR":
+            return GuardState.CLEAR
+        if value == "CONFIRMING":
+            return GuardState.CONFIRMING
+        return GuardState.BLOCKED
 
     def snapshot(self):
         now = self._clock()

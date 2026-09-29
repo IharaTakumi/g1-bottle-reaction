@@ -41,6 +41,17 @@ class MotionDecodeSafeReturnMiss(RuntimeError):
         )
 
 
+class MotionDecodeRecoverableAbort(RuntimeError):
+    """A released reaction abort whose resident recovery barrier is SAFE."""
+
+    def __init__(self, reaction: str, result: dict[str, Any],
+                 resident_status: dict[str, Any]) -> None:
+        self.reaction = reaction
+        self.result = dict(result)
+        self.resident_status = dict(resident_status)
+        super().__init__(str(result.get("recoverable_reason") or "recoverable abort"))
+
+
 def _resident_postflight_is_safe(status: dict[str, Any]) -> bool:
     """Require the complete post-reaction resident safety contract."""
     age = status.get("lowstate_age_s")
@@ -151,9 +162,10 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         run_factory: Callable[..., Any] = subprocess.run,
         resident: bool = True,
         socket_path: str = "/tmp/motiondecode-reaction.sock",
-        remote_root: str = "/tmp/motiondecode-current",
+        remote_root: str = "/home/unitree/g1-runtime/motiondecode/code",
         channel_factory: Callable[[], Any] | None = None,
         fallback: RobotAdapter | None = None,
+        hackathon_runtime: bool = False,
     ) -> None:
         if real and not enabled:
             raise RuntimeError("Real MotionDecode requires explicit real-robot enable")
@@ -180,6 +192,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self.resident = bool(resident)
         self.socket_path = socket_path
         self.fallback = fallback
+        self.hackathon_runtime = bool(hackathon_runtime)
         self._operation_lock = threading.Lock()
         self._shutdown = threading.Event()
         self._last_motion: str | None = None
@@ -224,6 +237,26 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             result.get("reason") or f"unsafe MotionDecode preflight: {result}"
         )
         return False
+
+    def recover_after_timeout(self, timeout: float = 2.0) -> bool:
+        """Bound a post-timeout status query; SAFE requires completed release."""
+        if not self.hackathon_runtime or self._channel is None or timeout <= 0:
+            return False
+        completed = threading.Event()
+        outcome = {"safe": False}
+
+        def query() -> None:
+            try:
+                outcome["safe"] = _resident_postflight_is_safe(
+                    self._channel.request({"operation": "status"})
+                )
+            except Exception:
+                outcome["safe"] = False
+            finally:
+                completed.set()
+
+        threading.Thread(target=query, daemon=True).start()
+        return completed.wait(timeout) and outcome["safe"]
 
     @staticmethod
     def reaction_name(motion: str) -> str | None:
@@ -295,6 +328,15 @@ class MotionDecodeReactionAdapter(RobotAdapter):
                            "released": True, "returned_to_q0": True}
                           if self.attended_real else parse_named_result(completed.stdout))
             if result.get("reaction") != reaction or result.get("status") != "pass":
+                self._last_result = result
+                if (self.hackathon_runtime
+                        and result.get("classification") == "RECOVERABLE_ABORT"
+                        and result.get("status") == "recoverable_abort"):
+                    post_status = self._channel.request({"operation": "status"})
+                    if _resident_postflight_is_safe(post_status):
+                        raise MotionDecodeRecoverableAbort(
+                            reaction, result, post_status
+                        )
                 raise RuntimeError(f"MotionDecode CLI returned failure: {result}")
             if self.real and self.resident:
                 # Preserve the complete fail-closed evidence even when a

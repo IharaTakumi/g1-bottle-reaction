@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import time
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,24 @@ PYTHON = Path("/home/ubuntu/.venvs/g1-game-vision/bin/python")
 MOTIONDECODE = Path("/home/ubuntu/dev/motiondecode-test")
 DRY_RUN_SOCKET = Path("/tmp/g1-integrated-motiondecode-dry.sock")
 PATROL_CONTROL_SOCKET = Path("/tmp/g1-patrol-control.sock")
+
+
+def ssh_host(target: str) -> str:
+    host = target.rsplit("@", 1)[-1]
+    if not host or not re.fullmatch(r"[A-Za-z0-9_.:-]+", host):
+        raise RuntimeError(f"invalid SSH target: {target!r}")
+    return host
+
+
+def route_to(host: str) -> tuple[str, str]:
+    result = subprocess.run(
+        ["ip", "-j", "route", "get", host], check=True,
+        capture_output=True, text=True, timeout=3,
+    )
+    routes = json.loads(result.stdout)
+    if len(routes) != 1 or not routes[0].get("dev") or not routes[0].get("prefsrc"):
+        raise RuntimeError(f"no unique local route to G1 host {host}")
+    return str(routes[0]["dev"]), str(routes[0]["prefsrc"])
 
 
 def parser() -> argparse.ArgumentParser:
@@ -54,7 +73,7 @@ def parser() -> argparse.ArgumentParser:
         "--camera-transport", choices=("ssh-rtp", "ssh-jpeg", "direct-dds"),
         default="ssh-jpeg",
     )
-    value.add_argument("--ssh-target", default="unitree@10.42.0.76")
+    value.add_argument("--ssh-target", required=True)
     value.add_argument("--ssh-control")
     value.add_argument("--yolo-model", type=Path, default=MODEL)
     value.add_argument(
@@ -66,11 +85,13 @@ def parser() -> argparse.ArgumentParser:
 
 
 def reaction_command(args: argparse.Namespace) -> list[str]:
+    host = ssh_host(args.ssh_target)
+    interface, local_ip = route_to(host)
     command = [
         str(PYTHON), "-B", str(REACTION),
-        "--usb-bind", "10.42.0.1",
-        "--usb-host", "10.42.0.76",
-        "--network-interface", "wlp128s20f3",
+        "--usb-bind", local_ip,
+        "--usb-host", host,
+        "--network-interface", interface,
         "--ssh-target", args.ssh_target,
         "--g1-camera-transport", args.camera_transport,
         "--g1-camera-port", "56001",
@@ -104,6 +125,7 @@ def reaction_command(args: argparse.Namespace) -> list[str]:
             "--confirm-site-ready",
             "--patrol-control-socket", str(PATROL_CONTROL_SOCKET),
             "--patrol-pause-timeout", "30",
+            "--hackathon-runtime",
         ]
     if args.ssh_control:
         command += ["--ssh-control", args.ssh_control]
@@ -112,19 +134,23 @@ def reaction_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
-def patrol_command() -> list[str]:
+def patrol_command(args: argparse.Namespace) -> list[str]:
+    host = ssh_host(args.ssh_target)
+    _interface, local_ip = route_to(host)
     return [
         str(PYTHON), str(PATROL),
         "--mode", "real",
         "--lidar-source", "relay",
-        "--relay-bind", "10.42.0.1", "--relay-port", "47621",
-        "--locomotion-relay-host", "10.42.0.76",
+        "--relay-bind", local_ip, "--relay-port", "47621",
+        "--locomotion-relay-host", host,
         "--locomotion-relay-port", "47622",
+        "--locomotion-telemetry-bind", local_ip,
         "--forward-distance", "2.0", "--return-distance", "4.0",
-        "--home-distance", "2.0", "--forward-speed", "0.30",
+        "--home-distance", "2.0",
         "--turn-yaw-rate", "0.50", "--max-lateral-drift", "0.80",
         "--heading-hold", "--loops", "1", "--arm", "--one-cycle",
         "--operator-approved-one-cycle",
+        "--hackathon-runtime",
         "--control-socket", str(PATROL_CONTROL_SOCKET), "--start-paused",
     ]
 
@@ -273,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
 
     preflight(args)
     reaction = reaction_command(args)
-    patrol = patrol_command()
+    patrol = patrol_command(args)
     if args.dry_run:
         run_patrol_dry_run()
         print("REACTION_COMMAND=" + subprocess.list2cmdline(reaction), flush=True)

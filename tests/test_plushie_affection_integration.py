@@ -160,6 +160,54 @@ def test_sparse_wireless_frames_still_require_two_fresh_positive_samples() -> No
     assert gate.update(plushie_detection(1.6), 1.6)
 
 
+def test_hackathon_plushie_confirmation_requires_multiple_fresh_frames() -> None:
+    gate = FoundGate(
+        duration=0.15,
+        grace=1.0,
+        cooldown=2.0,
+        confidence=0.25,
+        rearm_absence=3.0,
+        object_attribute="plushies",
+    )
+    first = plushie_detection(1.0)
+    assert not gate.update(first, 1.0)
+    assert not gate.update(first, 1.05)  # Replayed source frame cannot confirm.
+    assert not gate.update(plushie_detection(1.1), 1.1)
+    assert gate.update(plushie_detection(1.16), 1.16)
+
+
+@pytest.mark.parametrize(
+    ("visible", "expected", "stamps"),
+    [
+        (("person", "plushie"), "plushie", (1.0, 1.10, 1.16)),
+        (("banana", "plushie"), "plushie", (1.0, 1.10, 1.16)),
+        (("person",), "person", (1.0, 1.10, 1.20, 1.30)),
+        (("banana",), "banana", (1.0, 1.10, 1.20, 1.30)),
+    ],
+)
+def test_hackathon_confirmation_keeps_plushie_priority(
+    visible, expected, stamps
+) -> None:
+    person_gate = FoundGate(duration=.3)
+    banana_gate = FoundGate(duration=.3, object_attribute="bananas")
+    plushie_gate = FoundGate(
+        duration=.15, grace=1.0, object_attribute="plushies"
+    )
+    selected = None
+    for stamp in stamps:
+        result = Detection(
+            people=(Person((1, 2, 20, 30), .9),) if "person" in visible else (),
+            bananas=(Banana((2, 3, 22, 33), .9),) if "banana" in visible else (),
+            plushies=(Plushie((3, 4, 23, 34), .9),) if "plushie" in visible else (),
+            stamp=stamp,
+            status="RUNNING",
+        )
+        selected = selected or select_audio_trigger(
+            result, stamp, person_gate, banana_gate, plushie_gate
+        )
+    assert selected == expected
+
+
 def test_hold_for_twenty_seconds_does_not_rearm_on_overlapping_misclassification() -> None:
     gate = FoundGate(
         duration=0.3,
@@ -507,6 +555,7 @@ def test_commissioning_quiet_gain_is_minus_24_db() -> None:
 def test_commissioning_plushie_rearm_uses_three_seconds_explicit_absence() -> None:
     root = Path(__file__).resolve().parents[1]
     configured = load_plushie_settings(root, 0.25, "mock")
+    assert configured.duration == 0.15
     assert configured.rearm_absence == 3.0
     assert configured.absence_blocking_overlap == 0.1
 
@@ -545,4 +594,22 @@ def test_hackathon_joy_cli_gate_is_explicit_and_plushie_scoped() -> None:
     with pytest.raises(ValueError, match="plushie-capable"):
         validate_args(parser.parse_args(
             base + ["--reaction-target", "person", "--allow-hackathon-joy"]
+        ))
+
+
+def test_safe_return_miss_resume_cli_gate_requires_attended_real_patrol() -> None:
+    parser = build_parser()
+    base = [
+        "--source", "dual", "--yolo", "--found-audio",
+        "--robot", "motiondecode", "--enable-real-robot",
+        "--confirm-site-ready",
+    ]
+    assert parser.parse_args(base).allow_safe_return_miss_resume is False
+    validate_args(parser.parse_args(base + [
+        "--patrol-control-socket", "/tmp/patrol.sock",
+        "--allow-safe-return-miss-resume",
+    ]))
+    with pytest.raises(ValueError, match="Patrol interlock"):
+        validate_args(parser.parse_args(
+            base + ["--allow-safe-return-miss-resume"]
         ))
