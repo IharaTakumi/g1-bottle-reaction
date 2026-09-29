@@ -66,8 +66,10 @@ class _OneShotAudioStartGate:
     def wait(self, timeout: float) -> bool:
         if not self._released.wait(timeout) or self._cancelled.is_set():
             return False
-        self._started.set()
         return True
+
+    def mark_started(self) -> None:
+        self._started.set()
 
     def release_and_wait_started(self, timeout: float) -> bool:
         self._released.set()
@@ -110,6 +112,8 @@ class FoundWavSpeechBackend(SpeechBackend):
         started = time.monotonic()
         if callback is not None:
             callback(started)
+        if gate is not None:
+            gate.mark_started()
         print(f"Audio triggered: {path}; monotonic={started:.6f}", flush=True)
         self.last_attempt_successful = False
         try:
