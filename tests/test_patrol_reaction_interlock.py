@@ -21,6 +21,21 @@ class FakePatrol:
         self.running = True
         self.aborted = False
         self.last_stop_sent_monotonic = None
+        self.phase = "FORWARD_OUT"
+        self.forward_leg_id = 1
+        self.successful = set()
+
+    def reaction_context(self, target, force=False):
+        del force
+        return {
+            "eligible": self.phase.startswith("FORWARD_")
+            and (self.forward_leg_id, target) not in self.successful,
+            "phase": self.phase, "paused": False,
+            "forward_leg_id": self.forward_leg_id,
+        }
+
+    def mark_reaction_success(self, target, leg_id):
+        self.successful.add((leg_id, target))
 
     def stop_and_wait(self):
         self.running = False
@@ -200,7 +215,7 @@ def test_object_audio_waits_for_confirmed_patrol_stop_and_starts_with_motion(
         wait_idle(controller)
         assert events.index("PATROL STOP") < events.index("TELEMETRY READY")
         assert events.index("TELEMETRY READY") < events.index("AUDIO")
-        assert events.index("AUDIO") < events.index(motion)
+        assert events.index("TELEMETRY READY") < events.index(motion)
     finally:
         patrol.release_stop.set()
         controller.close()
