@@ -178,6 +178,10 @@ class AttenuatedWavOutput:
             self._temporary.cleanup()
 
 
+class _RecoverablePreflightBlock(RuntimeError):
+    """A receive-only start gate deferred motion without making the resident unsafe."""
+
+
 class FailSafeReactionRobotAdapter(RobotAdapter):
     """Log one named reaction and permanently inhibit motion after an exception."""
 
@@ -260,6 +264,14 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
                 "next reaction remains enabled",
                 flush=True,
             )
+        except _RecoverablePreflightBlock as exc:
+            self.recoverable_abort = True
+            self.recoverable_abort_postflight_safe = True
+            print(
+                "MOTION REACTION RECOVERABLE PREFLIGHT BLOCK: "
+                f"{exc}; no arm command sent; next reaction remains enabled",
+                flush=True,
+            )
         except Exception as exc:
             self.error = str(exc)
             print(
@@ -279,6 +291,10 @@ class FailSafeReactionRobotAdapter(RobotAdapter):
     @property
     def last_preflight_error(self) -> str:
         return str(getattr(self.delegate, "last_preflight_error", ""))
+
+    @property
+    def last_preflight_classification(self) -> str:
+        return str(getattr(self.delegate, "last_preflight_classification", ""))
 
     def request_shutdown(self) -> None:
         self.delegate.request_shutdown()
@@ -527,9 +543,13 @@ class FoundReactionController:
                 self._sleep(min(.25, max(0., deadline - time.monotonic())))
                 passed = self.robot.preflight_motion()
             if not passed:
-                raise RuntimeError(
-                    self.robot.last_preflight_error or "safety preflight failed"
-                )
+                reason = self.robot.last_preflight_error or "safety preflight failed"
+                if (self.hackathon_runtime
+                        and self.robot.last_preflight_classification
+                            == "RECOVERABLE_BLOCK"
+                        and self.robot.recover_after_timeout(2.0)):
+                    raise _RecoverablePreflightBlock(reason)
+                raise RuntimeError(reason)
             self.patrol.wait_reaction_ready()
             stationary = time.monotonic()
             with self._timing_lock:
@@ -542,6 +562,11 @@ class FoundReactionController:
                 f"{name.upper()} ARMS STATIONARY: monotonic={stationary:.6f}",
                 flush=True,
             )
+        except _RecoverablePreflightBlock:
+            gate = self._patrol_audio_gate
+            if gate is not None:
+                gate.cancel()
+            raise
         except Exception as exc:
             gate = self._patrol_audio_gate
             if gate is not None:

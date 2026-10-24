@@ -13,7 +13,6 @@ sys.path.insert(0, str(PATROL))
 
 from lidar_guard import GuardState
 from patrol_controller import (
-    LIDAR_BLOCKED_RECOVERY_S,
     LIDAR_RECOVERY_S,
     ODOM_SOURCE_RECOVERY_S,
     TRANSPORT_RECOVERY_S,
@@ -469,18 +468,32 @@ def test_hackathon_imu_source_stale_stops_then_recovers():
     assert clock.now == pytest.approx(.5)
 
 
-def test_hackathon_unrecovered_imu_source_is_final_stop():
+def test_hackathon_imu_source_waits_past_old_timeout_then_recovers():
     clock = AdvancingClock()
-    locomotion = SequencedTelemetry(imu=[imu_sample(ready=False, age=.8)])
+    stale = imu_sample(ready=False, age=.8)
+    locomotion = SequencedTelemetry(imu=[stale] * 126 + [imu_sample()])
     cfg = replace(config(), hackathon_runtime=True)
     controller = PatrolController(
         locomotion, ClearGuard(), cfg, clock=clock, sleep=clock.sleep,
         emit=lambda _message: None,
     )
-    with pytest.raises(RuntimeError, match="fresh IMU not received"):
-        controller._require_imu()
+    assert controller._require_imu()["imu_ready"] is True
     assert locomotion.stops == 1
-    assert clock.now >= 2.0
+    assert clock.now >= 2.5
+
+
+def test_hackathon_transport_waits_past_policy_window_then_recovers():
+    clock = AdvancingClock()
+    stale = imu_sample(transport=.25)
+    locomotion = SequencedTelemetry(imu=[stale] * 76 + [imu_sample()])
+    cfg = replace(config(), hackathon_runtime=True, telemetry_recovery_s=1.0)
+    controller = PatrolController(
+        locomotion, ClearGuard(), cfg, clock=clock, sleep=clock.sleep,
+        emit=lambda _message: None,
+    )
+    assert controller._require_imu()["transport_age"] == 0.0
+    assert locomotion.stops == 1
+    assert clock.now >= 1.5
 
 
 def test_odom_transport_only_stale_uses_same_bounded_recovery():
@@ -544,6 +557,19 @@ def test_odom_source_recovery_timeout_is_final_failure():
     assert locomotion.stops >= 1
     assert clock.now >= ODOM_SOURCE_RECOVERY_S
     assert any("RECOVERY TIMEOUT -> FINAL STOP" in item for item in events)
+
+
+def test_hackathon_odom_waits_past_old_timeout_then_recovers():
+    clock = AdvancingClock()
+    stale = odom_sample(age=.639)
+    locomotion = SequencedTelemetry(odom=[stale] * 126 + [odom_sample()])
+    controller = PatrolController(
+        locomotion, ClearGuard(), replace(config(), hackathon_runtime=True),
+        clock=clock, sleep=clock.sleep, emit=lambda _message: None,
+    )
+    assert controller._require_odom()["odom_age"] == 0.0
+    assert locomotion.stops == 1
+    assert clock.now >= 2.5
 
 
 def test_forward_transport_gap_preserves_odom_leg_progress():
@@ -641,6 +667,19 @@ def test_lidar_stale_timeout_remains_final_stop():
     assert locomotion.stops == 2
 
 
+def test_hackathon_lidar_stale_waits_past_old_timeout_then_recovers():
+    clock = AdvancingClock()
+    locomotion = SequencedTelemetry()
+    guard = SequencedGuard([GuardState.STALE] * 126 + [GuardState.CLEAR])
+    controller = PatrolController(
+        locomotion, guard, replace(config(), hackathon_runtime=True),
+        clock=clock, sleep=clock.sleep, emit=lambda _message: None,
+    )
+    assert controller._recover_lidar_guard("FORWARD") is GuardState.CLEAR
+    assert locomotion.stops == 1
+    assert clock.now >= 2.5
+
+
 def test_normal_lidar_blocked_stops_and_fails_without_move():
     locomotion = SimulatedLocomotion()
     controller = PatrolController(
@@ -684,20 +723,23 @@ def test_hackathon_turn_blocked_stops_yaw_and_resumes_remaining_turn():
     assert any("context=TURN" in event for event in events)
 
 
-def test_hackathon_blocked_timeout_is_hard_fault_and_never_moves():
+def test_hackathon_blocked_waits_past_old_timeout_then_recovers_without_move():
     clock = AdvancingClock()
     locomotion = SequencedTelemetry(
         imu=[imu_sample()], odom=[odom_sample()]
     )
+    events = []
     controller = PatrolController(
-        locomotion, SequencedGuard([GuardState.BLOCKED]),
+        locomotion,
+        SequencedGuard([GuardState.BLOCKED] * 501 + [GuardState.CLEAR]),
         replace(config(), hackathon_runtime=True),
-        clock=clock, sleep=clock.sleep, emit=lambda _message: None,
+        clock=clock, sleep=clock.sleep, emit=events.append,
     )
-    with pytest.raises(RuntimeError, match="HARD_FAULT.*recovery timeout"):
-        controller._recover_lidar_blocked("FORWARD")
-    assert clock.now >= LIDAR_BLOCKED_RECOVERY_S
-    assert locomotion.stops >= 2
+    state, elapsed = controller._recover_lidar_blocked("FORWARD")
+    assert state is GuardState.CLEAR
+    assert elapsed >= 10.0
+    assert locomotion.stops >= 1
+    assert any("BLOCKED RECOVERED -> RESUME" in event for event in events)
 
 
 def test_hackathon_blocked_recovery_operator_abort_is_immediate():
@@ -718,7 +760,7 @@ def test_hackathon_blocked_recovery_operator_abort_is_immediate():
     controller.sleep = aborting_sleep
     with pytest.raises(RuntimeError, match="operator abort"):
         controller._recover_lidar_blocked("TURN")
-    assert clock.now < LIDAR_BLOCKED_RECOVERY_S
+    assert clock.now < 0.1
 
 
 def _capture(errors, function, *args):
