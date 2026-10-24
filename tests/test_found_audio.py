@@ -18,6 +18,7 @@ from g1_bottle_reaction.game_vision.found_audio import (
     load_plushie_settings, load_settings, select_audio_trigger, validate_sound,
 )
 from g1_bottle_reaction.adapters.mock_robot import MockRobotAdapter
+from g1_bottle_reaction.adapters.motiondecode_reaction import MotionDecodeReactionAdapter
 from g1_bottle_reaction.adapters.g1_robot import (
     ARM_ACTION_RPC_TIMEOUT_CODE,
     G1RobotAdapter,
@@ -62,7 +63,7 @@ def object_detection(stamp, *, person=False, banana=False, plushie=False):
         stamp=stamp, status='RUNNING')
 
 
-def test_person_has_priority_when_person_and_banana_are_both_visible():
+def test_banana_has_priority_when_person_and_banana_are_both_visible():
     person_gate = FoundGate()
     banana_gate = FoundGate(object_attribute='bananas')
     selected = []
@@ -71,8 +72,8 @@ def test_person_has_priority_when_person_and_banana_are_both_visible():
                                        t, person_gate, banana_gate)
         if trigger:
             selected.append(trigger)
-    assert selected == ['person']
-    assert banana_gate.state == 'DETECTING'
+    assert selected == ['banana']
+    assert person_gate.state == 'DETECTING'
 
 
 def test_banana_triggers_once_when_no_person_then_waits_until_clear():
@@ -102,7 +103,7 @@ def test_plushie_plays_its_audio_once_using_teddy_bear_detection():
     assert plushie_gate.waiting_clear
 
 
-def test_existing_audio_priority_extends_to_plushie_without_overlap():
+def test_plushie_has_priority_over_banana_and_person():
     person_gate = FoundGate()
     banana_gate = FoundGate(object_attribute='bananas')
     plushie_gate = FoundGate(object_attribute='plushies')
@@ -113,10 +114,10 @@ def test_existing_audio_priority_extends_to_plushie_without_overlap():
             t, person_gate, banana_gate, plushie_gate)
         if trigger:
             selected.append(trigger)
-    assert selected == ['person']
+    assert selected == ['plushie']
 
 
-def test_banana_suppresses_plushie_when_both_stay_visible():
+def test_plushie_suppresses_banana_when_both_stay_visible():
     person_gate = FoundGate()
     banana_gate = FoundGate(object_attribute='bananas')
     plushie_gate = FoundGate(object_attribute='plushies')
@@ -127,7 +128,7 @@ def test_banana_suppresses_plushie_when_both_stay_visible():
             t, person_gate, banana_gate, plushie_gate)
         if trigger:
             selected.append(trigger)
-    assert selected == ['banana']
+    assert selected == ['plushie']
 
 
 def test_confirmation_cooldown_and_fresh_reconfirmation():
@@ -312,6 +313,210 @@ def wait_reaction(controller):
     while controller.busy and time.monotonic() < deadline:
         time.sleep(.005)
     assert not controller.busy
+
+
+def full_motiondecode_result(reaction, **overrides):
+    result = {
+        "accepted": True,
+        "state": "READY",
+        "reaction": reaction,
+        "status": "pass",
+        "executed": True,
+        "motion_completed": True,
+        "released": True,
+        "returned_to_q0": True,
+        "weight_zero": True,
+        "hard_fault": None,
+    }
+    result.update(overrides)
+    return result
+
+
+class SequencedResidentChannel:
+    def __init__(self, overrides=(), statuses=()):
+        self.requests = []
+        self.overrides = list(overrides)
+        self.statuses = list(statuses)
+
+    def request(self, payload):
+        self.requests.append(payload)
+        if payload["operation"] == "status":
+            if self.statuses:
+                return self.statuses.pop(0)
+            return safe_resident_status()
+        values = self.overrides.pop(0) if self.overrides else {}
+        return full_motiondecode_result(payload["reaction"], **values)
+
+    def close(self):
+        pass
+
+
+def safe_resident_status(**overrides):
+    status = {
+        "accepted": True,
+        "state": "READY",
+        "lowstate_age_s": 0.01,
+        "ownership_safe": True,
+        "external_writers": 0,
+        "weight": 0.0,
+        "fault": None,
+    }
+    status.update(overrides)
+    return status
+
+
+def make_motiondecode_controller(channel):
+    adapter = MotionDecodeReactionAdapter(
+        Path("."), real=True, enabled=True, allow_hackathon_joy=True,
+        channel_factory=lambda: channel,
+    )
+    settings = found_settings_for_test()
+    output = RecordingWavOutput()
+    controller = FoundReactionController(
+        {"person": settings, "banana": settings, "plushie": settings},
+        output,
+        adapter,
+        base_reaction=Reaction("FOUND", "notice", "unused", 0),
+        cooldown_seconds=0,
+        motion_overrides={
+            "person": "motiondecode:found",
+            "banana": "motiondecode:surprise",
+            "plushie": "motiondecode:joy",
+        },
+        speech_delay_overrides={"person": 0, "banana": 0, "plushie": 0},
+    )
+    return controller, output
+
+
+def test_motiondecode_full_success_results_do_not_latch_sequential_reactions():
+    channel = SequencedResidentChannel()
+    controller, output = make_motiondecode_controller(channel)
+    try:
+        for now, target in ((1, "person"), (4, "banana"), (7, "plushie")):
+            assert controller.trigger(target, now)
+            wait_reaction(controller)
+            assert controller.motion_error == ""
+        assert [request["reaction"] for request in channel.requests[1:]] == [
+            "found", "surprise", "joy"
+        ]
+        assert len(output.played) == 3
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize(
+    "failed_proof",
+    ({"weight_zero": False},),
+)
+def test_motiondecode_cleanup_failure_latches_motion_but_audio_continues(
+    failed_proof,
+):
+    channel = SequencedResidentChannel((failed_proof,))
+    controller, output = make_motiondecode_controller(channel)
+    try:
+        assert controller.trigger("person", 1)
+        wait_reaction(controller)
+        assert "lacks required cleanup proof" in controller.motion_error
+
+        assert controller.trigger("banana", 4)
+        wait_reaction(controller)
+        execute_requests = [
+            request for request in channel.requests if request["operation"] == "execute"
+        ]
+        assert [request["reaction"] for request in execute_requests] == ["found"]
+        assert len(output.played) == 2
+    finally:
+        controller.close()
+
+
+def test_safe_return_miss_does_not_latch_and_next_motion_and_audio_continue():
+    channel = SequencedResidentChannel((
+        {"returned_to_q0": False,
+         "controlled_q0_return_error_rad": 0.0322},
+        {},
+    ))
+    controller, output = make_motiondecode_controller(channel)
+    try:
+        assert controller.trigger("person", 1)
+        wait_reaction(controller)
+        assert controller.motion_error == ""
+        assert controller.robot.delegate.last_result["returned_to_q0"] is False
+
+        assert controller.trigger("plushie", 4)
+        wait_reaction(controller)
+        assert controller.motion_error == ""
+        execute_requests = [
+            request for request in channel.requests
+            if request["operation"] == "execute"
+        ]
+        assert [request["reaction"] for request in execute_requests] == [
+            "found", "joy"
+        ]
+        assert len(output.played) == 2
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize(
+    "unsafe_post_status",
+    (
+        safe_resident_status(state="FAULT", fault="resident fault"),
+        safe_resident_status(lowstate_age_s=0.15),
+    ),
+)
+def test_safe_return_miss_with_unsafe_postflight_permanently_latches(
+    unsafe_post_status,
+):
+    channel = SequencedResidentChannel(
+        ({"returned_to_q0": False,
+          "controlled_q0_return_error_rad": 0.0322},),
+        (safe_resident_status(), unsafe_post_status),
+    )
+    controller, output = make_motiondecode_controller(channel)
+    try:
+        assert controller.trigger("person", 1)
+        wait_reaction(controller)
+        assert "unsafe or ambiguous resident postflight" in controller.motion_error
+
+        assert controller.trigger("banana", 4)
+        wait_reaction(controller)
+        execute_requests = [
+            request for request in channel.requests
+            if request["operation"] == "execute"
+        ]
+        assert [request["reaction"] for request in execute_requests] == ["found"]
+        assert len(output.played) == 2
+    finally:
+        controller.close()
+
+
+def test_safe_return_miss_status_ipc_failure_permanently_latches():
+    class PostStatusFailureChannel(SequencedResidentChannel):
+        def request(self, payload):
+            if payload["operation"] == "status" and self.requests:
+                self.requests.append(payload)
+                raise RuntimeError("status IPC failed")
+            return super().request(payload)
+
+    channel = PostStatusFailureChannel((
+        {"returned_to_q0": False,
+         "controlled_q0_return_error_rad": 0.0322},
+    ))
+    controller, output = make_motiondecode_controller(channel)
+    try:
+        assert controller.trigger("person", 1)
+        wait_reaction(controller)
+        assert "status IPC failed" in controller.motion_error
+        assert controller.trigger("banana", 4)
+        wait_reaction(controller)
+        execute_requests = [
+            request for request in channel.requests
+            if request["operation"] == "execute"
+        ]
+        assert [request["reaction"] for request in execute_requests] == ["found"]
+        assert len(output.played) == 2
+    finally:
+        controller.close()
 
 
 def test_confirmed_detection_uses_shared_reaction_engine_once_and_rearms():
@@ -640,11 +845,12 @@ def test_default_audio_paths_are_semantic_and_separate(tmp_path):
         'banana_sound': 'assets/audio/reactions/banana/detected.wav',
         'plushie_found_duration': .3, 'plushie_dropout_grace': .15,
         'plushie_audio_cooldown': 2., 'plushie_rearm_absence': 1.,
-        'plushie_sound': 'assets/audio/reactions/plushie/detected.wav'}))
+        'plushie_sound': 'assets/audio/reactions/plushie/plushie_affectionate.wav',
+        'quiet_mode_gain_db': -30.0}))
     banana = load_banana_settings(tmp_path, .25, 'g1')
     assert banana.sounds == (banana_path.resolve(),)
     assert banana.confidence == .25 and banana.output == 'g1'
-    plushie_path = tmp_path/'assets/audio/reactions/plushie/detected.wav'
+    plushie_path = tmp_path/'assets/audio/reactions/plushie/plushie_affectionate.wav'
     plushie_path.parent.mkdir(parents=True)
     with wave.open(str(plushie_path), 'wb') as stream:
         stream.setnchannels(1)
@@ -654,6 +860,7 @@ def test_default_audio_paths_are_semantic_and_separate(tmp_path):
     plushie = load_plushie_settings(tmp_path, .25, 'g1')
     assert plushie.sounds == (plushie_path.resolve(),)
     assert plushie.confidence == .25 and plushie.output == 'g1'
+    assert plushie.rearm_absence == 1.0
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='G1 audio pipe helper is Linux-only')
