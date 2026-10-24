@@ -13,7 +13,6 @@ from lidar_guard import GuardState
 TRANSPORT_RECOVERY_S = 1.0
 ODOM_SOURCE_RECOVERY_S = 2.0
 LIDAR_RECOVERY_S = 2.0
-LIDAR_BLOCKED_RECOVERY_S = 10.0
 
 
 class PatrolState(str, Enum):
@@ -332,9 +331,12 @@ class PatrolController:
         return sample
 
     def _wait_for_odom(self, context: str = "FORWARD", *, abort_on_stop=False):
-        deadline = self.clock() + ODOM_SOURCE_RECOVERY_S
+        deadline = (
+            None if self.config.hackathon_runtime
+            else self.clock() + ODOM_SOURCE_RECOVERY_S
+        )
         sample = None
-        while self.clock() < deadline:
+        while deadline is None or self.clock() < deadline:
             if abort_on_stop and self._stop.is_set():
                 raise RuntimeError("patrol stopped during odometry recovery")
             sample = self.locomotion.odom_sample()
@@ -398,7 +400,11 @@ class PatrolController:
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped")
             started += self._checkpoint_reaction_pause()
+            telemetry_started = self.clock()
             sample = self._require_imu()
+            telemetry_wait = max(0.0, self.clock() - telemetry_started)
+            if telemetry_wait > self.config.command_period_s:
+                started += telemetry_wait
             current = float(sample["yaw"])
             delta = wrap_to_pi(current - previous)
             if abs(delta) > 0.50:
@@ -414,7 +420,9 @@ class PatrolController:
                 )
             guard_state = self.guard.state("turn")
             if guard_state is GuardState.STALE:
+                recovery_started = self.clock()
                 guard_state = self._recover_lidar_guard("TURN")
+                started += max(0.0, self.clock() - recovery_started)
             if guard_state is GuardState.BLOCKED:
                 if not self.config.hackathon_runtime:
                     self._send_stop()
@@ -457,9 +465,9 @@ class PatrolController:
         )
         recovered = False
         try:
-            deadline = started + 2.0
+            deadline = None if self.config.hackathon_runtime else started + 2.0
             latest = sample
-            while self.clock() < deadline:
+            while deadline is None or self.clock() < deadline:
                 if self._stop.is_set():
                     raise RuntimeError("patrol stopped during IMU recovery")
                 latest = self.locomotion.imu_sample()
@@ -558,8 +566,11 @@ class PatrolController:
         )
         recovered = False
         try:
-            deadline = started + self.config.telemetry_recovery_s
-            while self.clock() < deadline:
+            deadline = (
+                None if self.config.hackathon_runtime
+                else started + self.config.telemetry_recovery_s
+            )
+            while deadline is None or self.clock() < deadline:
                 if self._stop.is_set():
                     raise RuntimeError("patrol stopped during telemetry recovery")
                 latest = get_sample()
@@ -663,12 +674,17 @@ class PatrolController:
     def _recover_lidar_guard(self, context: str) -> GuardState:
         self._send_stop()
         started = self.clock()
-        deadline = started + LIDAR_RECOVERY_S
-        self.emit(
-            f"[patrol] LIDAR STALE -> STOP; waiting up to "
-            f"{LIDAR_RECOVERY_S:.1f}s context={context}"
+        deadline = (
+            None if self.config.hackathon_runtime
+            else started + LIDAR_RECOVERY_S
         )
-        while self.clock() < deadline:
+        self.emit(
+            "[patrol] LIDAR STALE -> RECOVERABLE_STOP; "
+            + ("waiting for fresh guard data " if deadline is None else
+               f"waiting up to {LIDAR_RECOVERY_S:.1f}s ")
+            + f"context={context}"
+        )
+        while deadline is None or self.clock() < deadline:
             if self._stop.is_set():
                 raise RuntimeError("patrol stopped during LiDAR recovery")
             direction = "turn" if context == "TURN" else "front"
@@ -691,13 +707,12 @@ class PatrolController:
         self._send_stop()
         self._recovering_telemetry.set()
         started = self.clock()
-        deadline = started + LIDAR_BLOCKED_RECOVERY_S
         self.emit(
-            "[patrol] LIDAR BLOCKED -> RECOVERABLE_STOP; waiting up to "
-            f"{LIDAR_BLOCKED_RECOVERY_S:.1f}s context={context}"
+            "[patrol] LIDAR BLOCKED -> RECOVERABLE_STOP; "
+            f"waiting for CLEAR context={context}"
         )
         try:
-            while self.clock() < deadline:
+            while True:
                 if self._stop.is_set():
                     raise RuntimeError("operator abort during LiDAR BLOCKED recovery")
                 direction = "turn" if context == "TURN" else "front"
@@ -718,12 +733,6 @@ class PatrolController:
                     )
                     return GuardState.CLEAR, elapsed
                 self.sleep(.02)
-            self._send_stop()
-            self.emit("[patrol] LIDAR BLOCKED RECOVERY TIMEOUT -> FINAL STOP")
-            raise RuntimeError(
-                "HARD_FAULT: LiDAR obstacle BLOCKED recovery timeout after "
-                f"{LIDAR_BLOCKED_RECOVERY_S:.1f}s"
-            )
         finally:
             self._recovering_telemetry.clear()
 

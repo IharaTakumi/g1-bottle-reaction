@@ -85,7 +85,8 @@ class Output:
 
 class Robot(RobotAdapter):
     def __init__(self, events, *, ready=True, safe_return=True, postflight=None,
-                 recoverable_abort=False):
+                 recoverable_abort=False, preflight_classification="",
+                 recovery_safe=False):
         self.events = events
         self.ready = ready
         self.safe_return = safe_return
@@ -100,10 +101,16 @@ class Robot(RobotAdapter):
         }
         self.recoverable_abort = recoverable_abort
         self.last_preflight_error = "Arms are not stationary" if not ready else ""
+        self.last_preflight_classification = preflight_classification
+        self.recovery_safe = recovery_safe
 
     def preflight_motion(self):
         self.events.append("PREFLIGHT")
         return self.ready
+
+    def recover_after_timeout(self, _timeout):
+        self.events.append("RECOVERY STATUS")
+        return self.recovery_safe
 
     def play_motion(self, motion):
         self.events.append(motion)
@@ -124,13 +131,16 @@ class Robot(RobotAdapter):
 
 def build(events, *, ready=True, safe_return=True, postflight=None,
           allow_safe_return_miss_resume=False, recoverable_abort=False,
-          hackathon_runtime=False):
+          hackathon_runtime=False, preflight_classification="",
+          recovery_safe=False):
     settings = FoundSettings(.25, .3, .15, 2, (Path("reaction.wav"),), "mock", 1)
     patrol = FakePatrol(events)
     controller = FoundReactionController(
         {"person": settings}, Output(events),
         Robot(events, ready=ready, safe_return=safe_return, postflight=postflight,
-              recoverable_abort=recoverable_abort),
+              recoverable_abort=recoverable_abort,
+              preflight_classification=preflight_classification,
+              recovery_safe=recovery_safe),
         base_reaction=Reaction("FOUND", "notice", "unused", 0),
         cooldown_seconds=0,
         motion_overrides={"person": "motiondecode:found"},
@@ -312,6 +322,24 @@ def test_stationary_preflight_failure_final_stops_without_reaction_or_audio():
         assert "AUDIO" in events
         assert patrol.aborted
         assert not patrol.running
+    finally:
+        controller.close()
+
+
+def test_hackathon_recoverable_preflight_block_skips_motion_and_resumes():
+    events = []
+    controller, patrol = build(
+        events, ready=False, hackathon_runtime=True,
+        preflight_classification="RECOVERABLE_BLOCK", recovery_safe=True,
+    )
+    try:
+        assert controller.trigger("person", 1)
+        wait_idle(controller)
+        assert "motiondecode:found" not in events
+        assert "RECOVERY STATUS" in events
+        assert "PATROL RESUME" in events
+        assert not patrol.aborted
+        assert patrol.running
     finally:
         controller.close()
 
