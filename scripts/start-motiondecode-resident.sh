@@ -17,6 +17,7 @@ arm_pid_file=/tmp/motiondecode-expected-arm-pid
 session_file=/tmp/motiondecode-reaction.session
 log=/tmp/motiondecode-resident-production.log
 source_ip=${MOTIONDECODE_ARM_SOURCE_IP:-192.168.123.161}
+reactions=${MOTIONDECODE_REACTIONS:-found,surprise}
 
 if [[ ${1:-} == --dry-run ]]; then
   echo "DRY_RUN: robot command NONE; reaction NONE; audio NONE; DDS writer NONE; resident start NONE; rsync NONE; install NONE"
@@ -58,9 +59,10 @@ arm_pid=$("$script_root/scripts/reaction-runtime-validate.py" arm "$report" --so
 "${ssh_base[@]}" "printf '%s\n' '$arm_pid' > '$arm_pid_file'"
 
 set +e
-"${ssh_base[@]}" /bin/bash -s -- "$code" "$deps" "$python" "$socket" "$pid_file" "$session_file" "$log" "$arm_pid" <<'REMOTE'
+"${ssh_base[@]}" /bin/bash -s -- "$code" "$deps" "$python" "$socket" "$pid_file" "$session_file" "$log" "$arm_pid" "$reactions" <<'REMOTE'
 set -euo pipefail
 code=$1; deps=$2; python=$3; socket=$4; pid_file=$5; session=$6; log=$7; arm_pid=$8
+reaction_args=(); for r in ${9//,/ }; do reaction_args+=(--reaction "$r"); done
 export PYTHONPATH="$deps:$code/scripts:/home/unitree/unitree_sdk2_python"
 export LD_LIBRARY_PATH="/home/unitree/work/unitree_sdk2/thirdparty/lib/aarch64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 status() { cd "$code" && "$python" -B scripts/resident_worker_client.py --socket "$socket" --timeout 3; }
@@ -73,7 +75,7 @@ if pgrep -af 'resident_worker[.]py' >/dev/null; then echo PROCESS_WITHOUT_SOCKET
 # A stale PID marker alone is not worker evidence.
 rm -f -- "$pid_file" "$session"
 cd "$code"
-nohup env PYTHONPATH="$PYTHONPATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" "$python" -u scripts/resident_worker.py --real --confirm-site-ready --network-interface eth0 --expected-arm-pid "$arm_pid" --lowstate-backend cyclonedds --reaction found --reaction surprise --socket "$socket" >"$log" 2>&1 </dev/null &
+nohup env PYTHONPATH="$PYTHONPATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" "$python" -u scripts/resident_worker.py --real --confirm-site-ready --network-interface eth0 --expected-arm-pid "$arm_pid" --lowstate-backend cyclonedds "${reaction_args[@]}" --socket "$socket" >"$log" 2>&1 </dev/null &
 pid=$!
 printf '%s\n' "$pid" >"$pid_file"
 printf 'arm_pid=%s\nstarted_at=%s\n' "$arm_pid" "$(date -Iseconds)" >"$session"

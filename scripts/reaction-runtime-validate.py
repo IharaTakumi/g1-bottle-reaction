@@ -38,7 +38,8 @@ def ready_status(status: dict) -> None:
         "external_writers": status.get("external_writers") == 0,
         "ownership_safe": status.get("ownership_safe") is True,
         "fault": status.get("fault") is None,
-        "preflight": status.get("preflight") == {"found": True, "surprise": True},
+        "preflight": {"found", "surprise"} <= set(status.get("preflight") or {})
+        and all((status.get("preflight") or {}).values()),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
