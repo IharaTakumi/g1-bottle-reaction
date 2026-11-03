@@ -24,11 +24,13 @@ fi
 [[ $# == 0 ]] || fail "usage: $0 [--dry-run]"
 reaction_ssh_ensure || exit $?
 ssh_base=("${reaction_ssh_base[@]}")
-state=$("${ssh_base[@]}" /bin/bash -s -- "$production" <<'REMOTE'
+# A valid but different bundle on the robot must be replaced, not reported ready.
+bundle_id=$(sha256sum "$bundle/BUNDLE_MANIFEST.sha256" | cut -d' ' -f1)
+state=$("${ssh_base[@]}" /bin/bash -s -- "$production" "$bundle_id" <<'REMOTE'
 set -euo pipefail
-root=$1
+root=$1; bundle_id=$2
 if test -S /tmp/motiondecode-reaction.sock || pgrep -af 'resident_worker[.]py' >/dev/null; then echo WORKER_OR_SOCKET_PRESENT; exit 3; fi
-if test -f "$root/BUNDLE_MANIFEST.sha256" && test -f "$root/code/MANIFEST.sha256" && test -f "$root/deps/MANIFEST.sha256" && (cd "$root" && sha256sum -c BUNDLE_MANIFEST.sha256 >/dev/null 2>&1) && (cd "$root/code" && sha256sum -c MANIFEST.sha256 >/dev/null 2>&1) && (cd "$root/deps" && sha256sum -c MANIFEST.sha256 >/dev/null 2>&1); then echo ALREADY_READY; else echo DEPLOY_REQUIRED; fi
+if test -f "$root/BUNDLE_MANIFEST.sha256" && test "$(sha256sum "$root/BUNDLE_MANIFEST.sha256" | cut -d' ' -f1)" = "$bundle_id" && test -f "$root/code/MANIFEST.sha256" && test -f "$root/deps/MANIFEST.sha256" && (cd "$root" && sha256sum -c BUNDLE_MANIFEST.sha256 >/dev/null 2>&1) && (cd "$root/code" && sha256sum -c MANIFEST.sha256 >/dev/null 2>&1) && (cd "$root/deps" && sha256sum -c MANIFEST.sha256 >/dev/null 2>&1); then echo ALREADY_READY; else echo DEPLOY_REQUIRED; fi
 REMOTE
 ) || fail "remote precondition check failed"
 [[ $state != WORKER_OR_SOCKET_PRESENT ]] || fail "resident worker or socket present"

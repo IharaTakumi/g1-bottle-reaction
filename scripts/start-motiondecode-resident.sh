@@ -75,7 +75,7 @@ if pgrep -af 'resident_worker[.]py' >/dev/null; then echo PROCESS_WITHOUT_SOCKET
 # A stale PID marker alone is not worker evidence.
 rm -f -- "$pid_file" "$session"
 cd "$code"
-nohup env PYTHONPATH="$PYTHONPATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" "$python" -u scripts/resident_worker.py --real --confirm-site-ready --network-interface eth0 --expected-arm-pid "$arm_pid" --lowstate-backend cyclonedds "${reaction_args[@]}" --socket "$socket" >"$log" 2>&1 </dev/null &
+nohup env PYTHONPATH="$PYTHONPATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" "$python" -u scripts/resident_worker.py --real --confirm-site-ready --network-interface eth0 --expected-arm-pid "$arm_pid" --lowstate-backend cyclonedds --hackathon-runtime "${reaction_args[@]}" --socket "$socket" >"$log" 2>&1 </dev/null &
 pid=$!
 printf '%s\n' "$pid" >"$pid_file"
 printf 'arm_pid=%s\nstarted_at=%s\n' "$arm_pid" "$(date -Iseconds)" >"$session"
