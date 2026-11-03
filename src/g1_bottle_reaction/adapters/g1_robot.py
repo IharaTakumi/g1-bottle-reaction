@@ -200,9 +200,11 @@ def serve_remote_camera_sender():
                     payload = pending[begin:end + 2]
                     pending = pending[end + 2:]
                     now = time.monotonic()
-                    if now < next_frame:
+                    # Tolerance: a 33 ms camera against a 33.3 ms budget must not
+                    # drop every other frame.
+                    if now < next_frame - 0.005:
                         continue
-                    next_frame = now + 1.0 / args.fps
+                    next_frame = max(next_frame + 1.0 / args.fps, now)
                     binary.write(frame_header.pack(b"G1J1", len(payload), frames + 1))
                     binary.write(payload)
                     binary.flush()
