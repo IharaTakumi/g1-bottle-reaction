@@ -17,6 +17,9 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+from g1_bottle_reaction.adapters.motiondecode_reaction import GAME_REACTIONS  # noqa: E402
 REACTION = ROOT / "tools/g1_dual_camera.py"
 PATROL = ROOT / "patrol/run_patrol.py"
 MODEL = ROOT / ".runtime/models/yolo11n.pt"
@@ -242,7 +245,8 @@ def start_dry_run_resident() -> subprocess.Popen[bytes]:
     process = subprocess.Popen(
         [
             str(PYTHON), "-u", str(MOTIONDECODE / "scripts/resident_worker.py"),
-            "--dry-run", "--reaction", "found", "--reaction", "surprise",
+            "--dry-run",
+            *(arg for name in sorted(GAME_REACTIONS) for arg in ("--reaction", name)),
             "--socket", str(DRY_RUN_SOCKET),
         ],
         cwd=MOTIONDECODE,
