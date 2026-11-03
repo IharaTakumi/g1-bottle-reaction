@@ -15,11 +15,16 @@ from .robot import RobotAdapter
 
 
 MOTION_PREFIX = "motiondecode:"
-VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found", "joy"})
+# Reactions played on the real G1 with waist and legs held and adopted by eye.
+GAME_REACTIONS = frozenset({
+    "surprise", "welcome", "salute", "chotto_bikkuri", "sokoni_ita", "odoroku",
+    "detekoi", "kinniku", "hisashiburi", "comical_dance", "tekitou_dance",
+})
+VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found", "joy"}) | GAME_REACTIONS
 # Keep real execution aligned with motiondecode-test/config/named_reactions.json.
 # ``joy`` remains available for dry-run compatibility but is explicitly marked
 # real_g1_validated=false by the owning runtime.
-REAL_G1_VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found"})
+REAL_G1_VALIDATED_REACTIONS = frozenset({"frustration", "surprise", "found"}) | GAME_REACTIONS
 
 
 class MotionDecodeSafeReturnMiss(RuntimeError):
@@ -200,6 +205,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
         self._last_result: dict[str, Any] | None = None
         self._last_preflight_error = ""
         self._channel = None
+        self.resident_preflight: dict[str, bool] = {}
         if self.resident:
             self._channel = (channel_factory() if channel_factory else
                 (LocalResidentChannel(socket_path, timeout_seconds)
@@ -211,6 +217,7 @@ class MotionDecodeReactionAdapter(RobotAdapter):
             if not status.get("accepted") or status.get("state") != "READY":
                 self._channel.close(); self._channel = None
                 raise RuntimeError(f"MotionDecode resident worker is not READY: {status}")
+            self.resident_preflight = dict(status.get("preflight") or {})
 
     @property
     def last_result(self) -> dict[str, Any] | None:

@@ -114,6 +114,27 @@ class LatestReader:
                 f"display skips={state.skipped}, RTP lost packets={state.lost_packets}")
 
 
+# Each target keeps its identity; the motion varies per event. The long dances
+# are left out because they hold Patrol for 11 s.
+REACTION_MOTION_POOLS = {
+    "person": ("sokoni_ita", "odoroku", "salute", "detekoi", "kinniku"),
+    "banana": ("surprise", "chotto_bikkuri", "welcome", "hisashiburi"),
+    "plushie": ("surprise", "chotto_bikkuri", "welcome", "hisashiburi"),
+}
+
+
+def reaction_motion_pools(robot) -> dict[str, tuple[str, ...]]:
+    """Motions per target, dropping any the resident failed to prevalidate."""
+    passed = getattr(robot, "resident_preflight", None) or {}
+    pools = {}
+    for target, names in REACTION_MOTION_POOLS.items():
+        usable = [name for name in names if not passed or passed.get(name) is True]
+        if not usable:
+            raise RuntimeError(f"No prevalidated MotionDecode reaction for {target}")
+        pools[target] = tuple(f"motiondecode:{name}" for name in usable)
+    return pools
+
+
 def letterbox(frame, width, height):
     if width <= 0 or height <= 0 or frame.ndim != 3 or frame.shape[2] != 3:
         raise ValueError("invalid display dimensions")
@@ -484,11 +505,8 @@ def run(args):
             else:
                 robot = MockRobotAdapter()
             if args.robot == "motiondecode":
-                motion_overrides = {
-                    "person": "motiondecode:found",
-                    "banana": "motiondecode:surprise",
-                    "plushie": "motiondecode:surprise",
-                }
+                motion_pools = reaction_motion_pools(robot)
+                motion_overrides = {name: pool[0] for name, pool in motion_pools.items()}
                 speech_delay_overrides = {
                     "person": 0.0,
                     "banana": 0.0,
@@ -496,6 +514,7 @@ def run(args):
                 }
             else:
                 motion_overrides = None
+                motion_pools = None
                 speech_delay_overrides = None
             reaction = FoundReactionController(
                 {
@@ -508,6 +527,7 @@ def run(args):
                 base_reaction=core_config.reaction.items[ReactionEvent.FOUND.value],
                 cooldown_seconds=core_config.reaction.cooldown_seconds,
                 motion_overrides=motion_overrides,
+                motion_pools=motion_pools,
                 speech_delay_overrides=speech_delay_overrides,
                 wander=wander,
                 patrol=patrol,

@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import math
 from pathlib import Path
+import random
 import tempfile
 import threading
 import time
@@ -300,6 +301,7 @@ class FoundReactionController:
         cooldown_seconds: float,
         motion_overrides: dict[str, str] | None = None,
         speech_delay_overrides: dict[str, float] | None = None,
+        motion_pools: dict[str, tuple[str, ...]] | None = None,
         wander=None,
         patrol=None,
         reaction_completion_timeout: float = 35.0,
@@ -313,7 +315,9 @@ class FoundReactionController:
             raise ValueError("Dual-camera G1 reaction is restricted to existing 'notice'")
         motion_overrides = motion_overrides or {}
         speech_delay_overrides = speech_delay_overrides or {}
-        unknown = (set(motion_overrides) | set(speech_delay_overrides)) - set(settings)
+        motion_pools = motion_pools or {}
+        unknown = ((set(motion_overrides) | set(speech_delay_overrides) | set(motion_pools))
+                   - set(settings))
         if unknown:
             raise ValueError(f"Unknown found reaction overrides: {sorted(unknown)}")
         if reaction_completion_timeout <= 0:
@@ -335,6 +339,15 @@ class FoundReactionController:
                 bypass_cooldown=False,
             )
             for name, value in settings.items()
+        }
+        self.motion_pools = {name: tuple(pool) for name, pool in motion_pools.items()}
+        if not all(self.motion_pools.values()):
+            raise ValueError("Reaction motion pools must not be empty")
+        self._last_motion: str | None = None
+        self.motion_voices = {
+            name: {motion: find_motion_voices(settings[name].sounds[0].parent, name, motion)
+                   for motion in pool}
+            for name, pool in self.motion_pools.items()
         }
         self.speech = FoundWavSpeechBackend(output)
         self.robot = FailSafeReactionRobotAdapter(robot)
@@ -379,6 +392,20 @@ class FoundReactionController:
     @property
     def motion_error(self) -> str:
         return self.robot.error
+
+    def _select_motion(self, name: str) -> None:
+        """Pick this event's motion and its paired voice, avoiding an immediate repeat."""
+        pool = self.motion_pools.get(name)
+        if not pool:
+            return
+        fresh = [motion for motion in pool if motion != self._last_motion] or list(pool)
+        motion = random.choice(fresh)
+        self._last_motion = motion
+        key = FOUND_REACTION_EVENTS[name].value
+        items = self.engine.config.items
+        voices = self.motion_voices[name][motion]
+        speech = str(random.choice(voices)) if voices else str(self.settings[name].sounds[0])
+        items[key] = replace(items[key], motion=motion, speech=speech)
 
     def trigger(self, name: str, now: float) -> bool:
         if name not in FOUND_REACTION_EVENTS:
@@ -435,6 +462,7 @@ class FoundReactionController:
                 except Exception as exc:
                     print(f"WANDER RESUME FAILED: {exc}; robot remains stopped", flush=True)
                 return True
+        self._select_motion(name)
         decision = self.engine.handle(
             FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
         )
@@ -483,6 +511,7 @@ class FoundReactionController:
         self.robot.set_motion_gate(
             lambda: self._patrol_motion_gate(name), self._record_motion_start
         )
+        self._select_motion(name)
         decision = self.engine.handle(
             FOUND_REACTION_EVENTS[name], encounter_count=1, now=now
         )
@@ -775,6 +804,18 @@ def load_quiet_gain_db(root) -> float:
     if not math.isfinite(gain_db) or not -60.0 <= gain_db < 0.0:
         raise ValueError("quiet_mode_gain_db must be finite and in [-60, 0) dB")
     return gain_db
+
+
+def find_motion_voices(directory: Path, target: str, motion: str) -> tuple[Path, ...]:
+    """Voices paired with a motion: <target>_<name>_<n>.wav in the target's folder.
+
+    Validated here so a bad file stops startup rather than a reaction mid-game.
+    """
+    name = motion.removeprefix("motiondecode:")
+    voices = tuple(sorted(Path(directory).glob(f"{target}_{name}_*.wav")))
+    for path in voices:
+        validate_sound(path)
+    return voices
 
 
 def validate_sound(path):

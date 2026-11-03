@@ -14,6 +14,7 @@ import yaml
 from g1_bottle_reaction.game_vision.app import build_parser, main
 from g1_bottle_reaction.game_vision.dual import FrameState, compose
 from g1_bottle_reaction.game_vision.found_audio import (
+    FOUND_REACTION_EVENTS,
     FoundGate, FoundReactionController, SingleAudioWorker, load_banana_settings,
     load_plushie_settings, load_settings, select_audio_trigger, validate_sound,
 )
@@ -887,3 +888,86 @@ def test_g1_audio_reuses_one_process_for_multiple_sounds(tmp_path):
     finally:
         output.close()
     assert output.process.poll() is not None
+
+
+def test_reaction_pools_keep_surprise_and_targets():
+    from g1_bottle_reaction.game_vision.dual import REACTION_MOTION_POOLS, reaction_motion_pools
+    assert set(REACTION_MOTION_POOLS) == {"person", "banana", "plushie"}
+    assert "surprise" in REACTION_MOTION_POOLS["banana"]
+    assert "surprise" in REACTION_MOTION_POOLS["plushie"]
+    class Robot:
+        resident_preflight = {"surprise": True, "welcome": False, "sokoni_ita": True}
+    pools = reaction_motion_pools(Robot())
+    assert pools["person"] == ("motiondecode:sokoni_ita",)
+    assert pools["banana"] == ("motiondecode:surprise",)
+
+
+def test_reaction_pool_without_a_usable_motion_refuses_to_start():
+    from g1_bottle_reaction.game_vision.dual import reaction_motion_pools
+    class Robot:
+        resident_preflight = {"surprise": True}
+    with pytest.raises(RuntimeError, match="person"):
+        reaction_motion_pools(Robot())
+
+
+def test_motion_pool_varies_without_immediate_repeat():
+    settings = found_settings_for_test()
+    pool = ("motiondecode:a", "motiondecode:b", "motiondecode:c")
+    controller = FoundReactionController(
+        {"person": settings, "banana": settings, "plushie": settings},
+        RecordingWavOutput(),
+        MockRobotAdapter(),
+        base_reaction=Reaction("FOUND", "notice", "unused", 0),
+        cooldown_seconds=0,
+        motion_pools={"person": pool},
+    )
+    key = FOUND_REACTION_EVENTS["person"].value
+    picked = []
+    for _ in range(60):
+        controller._select_motion("person")
+        picked.append(controller.engine.config.items[key].motion)
+    assert set(picked) == set(pool)
+    assert all(first != second for first, second in zip(picked, picked[1:]))
+
+
+def write_test_wav(path):
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(1); stream.setsampwidth(2); stream.setframerate(44100)
+        stream.writeframes(b"\0\0" * 100)
+
+
+def voice_controller(sound):
+    settings = replace(found_settings_for_test(), sounds=(sound,))
+    return FoundReactionController(
+        {"person": settings, "banana": settings, "plushie": settings},
+        RecordingWavOutput(),
+        MockRobotAdapter(),
+        base_reaction=Reaction("FOUND", "notice", "unused", 0),
+        cooldown_seconds=0,
+        motion_pools={"person": ("motiondecode:salute", "motiondecode:odoroku")},
+    )
+
+
+def test_motion_plays_its_paired_voice_or_the_default(tmp_path):
+    default = tmp_path / "detected.wav"
+    write_test_wav(default)
+    voices = {tmp_path / "person_salute_1.wav", tmp_path / "person_salute_2.wav"}
+    for path in voices:
+        write_test_wav(path)
+    controller = voice_controller(default)
+    key = FOUND_REACTION_EVENTS["person"].value
+    seen = {}
+    for _ in range(80):
+        controller._select_motion("person")
+        item = controller.engine.config.items[key]
+        seen.setdefault(item.motion, set()).add(item.speech)
+    assert seen["motiondecode:salute"] == {str(path) for path in voices}
+    assert seen["motiondecode:odoroku"] == {str(default)}
+
+
+def test_bad_paired_voice_stops_startup(tmp_path):
+    default = tmp_path / "detected.wav"
+    write_test_wav(default)
+    (tmp_path / "person_salute_1.wav").write_bytes(b"not a wav")
+    with pytest.raises(ValueError, match="person_salute_1"):
+        voice_controller(default)
