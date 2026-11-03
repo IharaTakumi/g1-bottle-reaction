@@ -344,6 +344,7 @@ class FoundReactionController:
         if not all(self.motion_pools.values()):
             raise ValueError("Reaction motion pools must not be empty")
         self._last_motion: str | None = None
+        self._motion_decks: dict[str, list[str]] = {}
         self.motion_voices = {
             name: {motion: find_motion_voices(settings[name].sounds[0].parent, name, motion)
                    for motion in pool}
@@ -394,12 +395,22 @@ class FoundReactionController:
         return self.robot.error
 
     def _select_motion(self, name: str) -> None:
-        """Pick this event's motion and its paired voice, avoiding an immediate repeat."""
+        """Pick this event's motion and its paired voice from a shuffled deck.
+
+        Every motion in the pool plays once before any repeats, and a new deck
+        never starts with the motion that just played.
+        """
         pool = self.motion_pools.get(name)
         if not pool:
             return
-        fresh = [motion for motion in pool if motion != self._last_motion] or list(pool)
-        motion = random.choice(fresh)
+        deck = self._motion_decks.get(name)
+        if not deck:
+            deck = list(pool)
+            random.shuffle(deck)
+            if len(deck) > 1 and deck[-1] == self._last_motion:
+                deck[0], deck[-1] = deck[-1], deck[0]
+            self._motion_decks[name] = deck
+        motion = deck.pop()
         self._last_motion = motion
         key = FOUND_REACTION_EVENTS[name].value
         items = self.engine.config.items

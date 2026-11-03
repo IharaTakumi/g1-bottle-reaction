@@ -928,6 +928,9 @@ def test_motion_pool_varies_without_immediate_repeat():
         picked.append(controller.engine.config.items[key].motion)
     assert set(picked) == set(pool)
     assert all(first != second for first, second in zip(picked, picked[1:]))
+    # Each deck of len(pool) events plays every motion once.
+    for start in range(0, len(picked), len(pool)):
+        assert sorted(picked[start:start + len(pool)]) == sorted(pool)
 
 
 def write_test_wav(path):
