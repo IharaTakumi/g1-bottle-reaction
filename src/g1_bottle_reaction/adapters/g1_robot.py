@@ -121,6 +121,7 @@ def serve_remote_camera_sender():
     """
     import argparse
     import contextlib
+    import glob
     import json
     import os
     import resource
@@ -140,6 +141,9 @@ def serve_remote_camera_sender():
     parser.add_argument("--stdout-framed", action="store_true")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--duration", type=float, default=3600.0)
+    # By-id names survive USB re-enumeration, unlike /dev/videoN numbers.
+    parser.add_argument("--usb-camera-glob",
+                        default="/dev/v4l/by-id/usb-046d_C922*-video-index0")
     args = parser.parse_args()
     if not 0 < args.fps <= 60 or args.duration <= 0:
         raise ValueError("invalid G1 camera sender port, FPS or duration")
@@ -156,7 +160,62 @@ def serve_remote_camera_sender():
     process = client = None
     frames = errors = sent_bytes = 0
     started = last_frame = time.monotonic()
+    usb_devices = sorted(glob.glob(args.usb_camera_glob)) if args.stdout_framed else []
+    if args.stdout_framed:
+        # Native SDK logs go to fd 1; keep them out of the binary frame stream.
+        binary = os.fdopen(os.dup(1), "wb")
+        os.dup2(2, 1)
     try:
+        if usb_devices:
+            # An attached UVC camera needs no DDS client or video service.
+            frame_header = struct.Struct("!4sIQ")
+            command = [
+                "gst-launch-1.0", "-q", "v4l2src", "device=" + usb_devices[0], "!",
+                "image/jpeg,width=1280,height=720,framerate=30/1", "!",
+                "queue", "leaky=downstream", "max-size-buffers=1", "!",
+                "fdsink", "fd=1", "sync=false",
+            ]
+            env = dict(os.environ, GST_REGISTRY="/dev/null", GST_REGISTRY_UPDATE="no")
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, env=env)
+            print(json.dumps({"status": "ready", "transport": "SSH/JPEG",
+                              "device": usb_devices[0]}), file=sys.stderr, flush=True)
+            pending = b""
+            next_frame = last_report = time.monotonic()
+            while time.monotonic() - started < args.duration:
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    sys.stdin.readline()
+                    break
+                if not select.select([process.stdout], [], [], 5.0)[0]:
+                    raise RuntimeError("USB camera produced no data for 5 s")
+                chunk = os.read(process.stdout.fileno(), 1048576)
+                if not chunk:
+                    raise RuntimeError("USB camera stream ended: %s" % process.poll())
+                pending += chunk
+                while True:
+                    begin = pending.find(b"\xff\xd8")
+                    end = pending.find(b"\xff\xd9", begin + 2) if begin >= 0 else -1
+                    if end < 0:
+                        pending = pending[begin:] if begin >= 0 else b""
+                        break
+                    payload = pending[begin:end + 2]
+                    pending = pending[end + 2:]
+                    now = time.monotonic()
+                    # Tolerance: a 33 ms camera against a 33.3 ms budget must not
+                    # drop every other frame.
+                    if now < next_frame - 0.005:
+                        continue
+                    next_frame = max(next_frame + 1.0 / args.fps, now)
+                    binary.write(frame_header.pack(b"G1J1", len(payload), frames + 1))
+                    binary.write(payload)
+                    binary.flush()
+                    frames += 1
+                    sent_bytes += len(payload)
+                    if now - last_report >= 5:
+                        print("G1 CAMERA SENDER: frames=%d fps=%.1f bytes=%d errors=%d" % (
+                            frames, frames / (now - started), sent_bytes, errors),
+                            file=sys.stderr, flush=True)
+                        last_report = now
+            return
         with contextlib.redirect_stdout(sys.stderr):
             import unitree_sdk2py.core.channel as channel
             from unitree_sdk2py.go2.video.video_client import VideoClient
@@ -177,7 +236,6 @@ def serve_remote_camera_sender():
             client.Init()
 
         if args.stdout_framed:
-            binary = sys.stdout.buffer
             frame_header = struct.Struct("!4sIQ")
             print(json.dumps({"status": "ready", "transport": "SSH/JPEG"}),
                   file=sys.stderr, flush=True)
