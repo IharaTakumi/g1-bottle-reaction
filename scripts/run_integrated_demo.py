@@ -71,6 +71,11 @@ def parser() -> argparse.ArgumentParser:
         help="required second gate for --real-patrol",
     )
     value.add_argument("--duration", type=float, default=30.0)
+    value.add_argument("--laps", type=int, default=1, help="Patrol loops before finishing")
+    value.add_argument(
+        "--patrol-host",
+        help="G1 address for the UDP Patrol relays when SSH uses another route",
+    )
     value.add_argument("--headless", action="store_true")
     value.add_argument(
         "--camera-transport", choices=("ssh-rtp", "ssh-jpeg", "direct-dds"),
@@ -138,7 +143,7 @@ def reaction_command(args: argparse.Namespace) -> list[str]:
 
 
 def patrol_command(args: argparse.Namespace) -> list[str]:
-    host = ssh_host(args.ssh_target)
+    host = args.patrol_host or ssh_host(args.ssh_target)
     _interface, local_ip = route_to(host)
     return [
         str(PYTHON), str(PATROL),
@@ -151,7 +156,7 @@ def patrol_command(args: argparse.Namespace) -> list[str]:
         "--forward-distance", "2.0", "--return-distance", "4.0",
         "--home-distance", "2.0",
         "--turn-yaw-rate", "0.50", "--max-lateral-drift", "0.80",
-        "--heading-hold", "--loops", "1", "--arm", "--one-cycle",
+        "--heading-hold", "--loops", str(args.laps), "--arm", "--one-cycle",
         "--operator-approved-one-cycle",
         "--hackathon-runtime",
         "--control-socket", str(PATROL_CONTROL_SOCKET), "--start-paused",
@@ -269,9 +274,9 @@ def start_dry_run_resident() -> subprocess.Popen[bytes]:
     raise RuntimeError("MotionDecode dry-run resident did not become READY")
 
 
-def run_patrol_dry_run() -> None:
+def run_patrol_dry_run(laps: int = 1) -> None:
     subprocess.run(
-        [str(PYTHON), str(PATROL), "--mode", "dry-run", "--loops", "1"],
+        [str(PYTHON), str(PATROL), "--mode", "dry-run", "--loops", str(laps)],
         cwd=ROOT, check=True,
     )
 
@@ -296,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.duration <= 0:
         raise SystemExit("--duration must be positive")
+    if not 1 <= args.laps <= 100:
+        raise SystemExit("--laps must be within 1..100")
     if args.real_patrol and not args.operator_approved_real_patrol:
         raise SystemExit("--real-patrol requires --operator-approved-real-patrol")
     if args.no_locomotion and args.operator_approved_real_patrol:
@@ -305,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     reaction = reaction_command(args)
     patrol = patrol_command(args)
     if args.dry_run:
-        run_patrol_dry_run()
+        run_patrol_dry_run(args.laps)
         print("REACTION_COMMAND=" + subprocess.list2cmdline(reaction), flush=True)
         print("PATROL_COMMAND=" + ("NOT ARMED" if args.no_locomotion
                                     else subprocess.list2cmdline(patrol)), flush=True)
@@ -321,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.no_locomotion:
             reaction_process = subprocess.Popen(reaction, cwd=ROOT, start_new_session=True)
             print(f"REACTION_PID={reaction_process.pid}", flush=True)
-            run_patrol_dry_run()
+            run_patrol_dry_run(args.laps)
             print("LOCOMOTION=NOT ARMED", flush=True)
             return reaction_process.wait()
         patrol_process = subprocess.Popen(patrol, cwd=ROOT, start_new_session=True)
