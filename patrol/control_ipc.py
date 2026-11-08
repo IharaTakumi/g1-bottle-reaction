@@ -46,10 +46,12 @@ class PatrolControlServer:
                     request = json.loads(stream.readline())
                     response = self._dispatch(request)
                 except Exception as exc:
+                    # The status has its own "error" (the last patrol failure); the
+                    # request's error must win.
                     response = {
+                        **self.controller.control_status(),
                         "ok": False,
                         "error": str(exc),
-                        **self.controller.control_status(),
                     }
                 stream.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
                 stream.flush()
@@ -72,6 +74,9 @@ class PatrolControlServer:
             return {"ok": True, **self.controller.control_status()}
         if operation == "reaction_ready":
             return {"ok": True, **self.controller.verify_reaction_ready()}
+        if operation == "settings":
+            return {"ok": True, **self.controller.request_settings(
+                request.get("speed_m_s"), request.get("course_length_m"))}
         if operation == "finish":
             return {"ok": True, **self.controller.request_finish()}
         if operation == "stop":

@@ -97,6 +97,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.dashboard.emergency_stop()
             elif action == "finish":
                 result = self.dashboard.finish()
+            elif action == "settings":
+                result = self.dashboard.change_settings(params)
+            elif action == "volume":
+                result = self.dashboard.set_volume(params.get("level"))
             elif action == "release":
                 result = {"ok": True, "job": self.dashboard.release()}
             else:

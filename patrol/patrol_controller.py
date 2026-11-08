@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import math
 import threading
 import time
 
+from hackathon_profile import COURSE_LENGTH_RANGE_M
 from lidar_guard import GuardState
 
 TRANSPORT_RECOVERY_S = 1.0
@@ -47,6 +48,7 @@ class PatrolConfig:
     slow_forward_speed_m_s: float = 0.10
     odom_stale_s: float = 0.50
     max_physical_speed_m_s: float = 0.50
+    max_forward_speed_m_s: float = 0.50
     odom_jump_margin_m: float = 0.15
     max_lateral_drift_m: float = 0.80
     heading_hold: bool = True
@@ -85,6 +87,7 @@ class PatrolController:
         self._loops_completed = 0
         self._loops_target: int | None = None
         self._origin: dict[str, float] | None = None
+        self._pending_settings: dict[str, float] | None = None
 
     def pause(self) -> None:
         self._pause_requested.set()
@@ -158,6 +161,50 @@ class PatrolController:
         self.emit("[patrol] FINISH REQUESTED -> stop after this loop")
         return self.control_status()
 
+    def request_settings(self, speed_m_s=None, course_length_m=None) -> dict[str, object]:
+        """Change speed or course length from the start of the next loop.
+
+        The course stays centred on the start: out half, back the full length,
+        home half. Changes never apply in the middle of a loop.
+        """
+        pending: dict[str, float] = {}
+        if speed_m_s is not None:
+            speed = float(speed_m_s)
+            if not 0.10 <= speed <= self.config.max_forward_speed_m_s:
+                raise ValueError(
+                    f"speed must be 0.10 to {self.config.max_forward_speed_m_s:.2f} m/s")
+            pending["speed_m_s"] = speed
+        if course_length_m is not None:
+            course = float(course_length_m)
+            if not COURSE_LENGTH_RANGE_M[0] <= course <= COURSE_LENGTH_RANGE_M[1]:
+                raise ValueError("course length must be %.1f to %.1f m" % COURSE_LENGTH_RANGE_M)
+            pending["course_length_m"] = course
+        if not pending:
+            raise ValueError("no setting to change")
+        with self._control_lock:
+            self._pending_settings = {**(self._pending_settings or {}), **pending}
+            text = ", ".join(f"{k}={v:g}" for k, v in self._pending_settings.items())
+        self.emit(f"[patrol] SETTINGS for the next loop: {text}")
+        return self.control_status()
+
+    def _apply_pending_settings(self) -> None:
+        with self._control_lock:
+            pending, self._pending_settings = self._pending_settings, None
+        if not pending:
+            return
+        changes: dict[str, float] = {}
+        if "speed_m_s" in pending:
+            changes["forward_speed_m_s"] = pending["speed_m_s"]
+            changes["max_physical_speed_m_s"] = max(0.50, pending["speed_m_s"])
+        if "course_length_m" in pending:
+            half = pending["course_length_m"] / 2
+            changes.update(forward_distance_m=half, return_distance_m=pending["course_length_m"],
+                           home_distance_m=half)
+        self.config = replace(self.config, **changes)
+        self.emit("[patrol] SETTINGS applied: speed=%.2fm/s course=%.2fm (out %.2f, back %.2f, home %.2f)" % (
+            self.config.forward_speed_m_s, self.config.return_distance_m, self.config.forward_distance_m,
+            self.config.return_distance_m, self.config.home_distance_m))
+
     def control_status(self) -> dict[str, object]:
         status = self._control_fields()
         status.update(self._observation())
@@ -186,7 +233,8 @@ class PatrolController:
             "route": {"forward_m": self.config.forward_distance_m,
                       "return_m": self.config.return_distance_m,
                       "home_m": self.config.home_distance_m,
-                      "speed_m_s": self.config.forward_speed_m_s},
+                      "speed_m_s": self.config.forward_speed_m_s,
+                      "max_speed_m_s": self.config.max_forward_speed_m_s},
         }
 
     def _control_fields(self) -> dict[str, object]:
@@ -195,6 +243,7 @@ class PatrolController:
                 "loops_completed": self._loops_completed,
                 "loops_target": self._loops_target,
                 "finish_requested": self._finish_requested.is_set(),
+                "pending_settings": self._pending_settings,
                 "state": self.state.value,
                 "phase": self._active_state.value,
                 "paused": self._paused.is_set(),
@@ -213,14 +262,16 @@ class PatrolController:
                 "forward_leg_id": self._forward_leg_id,
             }
 
-    def run(self, cycles: int | None = 1) -> None:
-        stages = (
+    def _stages(self):
+        return (
             ("forward", PatrolState.FORWARD_OUT, self.config.forward_distance_m),
             ("turn", PatrolState.TURN_BACK, self.config.turn_angle_rad),
             ("forward", PatrolState.FORWARD_RETURN, self.config.return_distance_m),
             ("turn", PatrolState.TURN_HOME, self.config.turn_angle_rad),
             ("forward", PatrolState.FORWARD_HOME, self.config.home_distance_m),
         )
+
+    def run(self, cycles: int | None = 1) -> None:
         completed = 0
         self._loops_target = cycles
         start = self.locomotion.odom_sample()
@@ -229,7 +280,8 @@ class PatrolController:
                             "yaw": float(start["odom_yaw"])}
         try:
             while cycles is None or completed < cycles:
-                for kind, state, target in stages:
+                self._apply_pending_settings()
+                for kind, state, target in self._stages():
                     if kind == "forward":
                         self._run_forward(state, target)
                     else:

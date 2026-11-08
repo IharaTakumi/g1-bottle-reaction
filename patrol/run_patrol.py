@@ -24,6 +24,7 @@ from control_ipc import PatrolControlServer
 from udp_relay_guard import UdpRelayGuard
 from hackathon_profile import (
     FORWARD_SPEED_M_S as HACKATHON_FORWARD_SPEED_M_S,
+    MAX_FORWARD_SPEED_M_S as HACKATHON_MAX_FORWARD_SPEED_M_S,
     LIDAR_STOP_DISTANCE_M as HACKATHON_LIDAR_STOP_DISTANCE_M,
     TELEMETRY_RECOVERY_S as HACKATHON_TELEMETRY_RECOVERY_S,
 )
@@ -44,8 +45,9 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--locomotion-relay-host", default="10.42.0.76")
     value.add_argument("--locomotion-relay-port", type=int, default=47622)
     value.add_argument("--locomotion-telemetry-bind", default="10.42.0.1")
-    value.add_argument("--forward-speed", type=float, default=0.30)
-    value.add_argument("--max-forward-speed", type=float, choices=(0.30, 0.50),
+    value.add_argument("--forward-speed", type=float,
+                       help="default 0.30, or 0.50 with --hackathon-runtime")
+    value.add_argument("--max-forward-speed", type=float, choices=(0.30, 0.50, 0.80),
                        default=0.30)
     value.add_argument("--telemetry-recovery-timeout", type=float,
                        choices=(1.0, 2.0), default=1.0)
@@ -73,10 +75,13 @@ def parser() -> argparse.ArgumentParser:
 
 def config(args) -> PatrolConfig:
     if args.hackathon_runtime:
-        args.forward_speed = HACKATHON_FORWARD_SPEED_M_S
-        args.max_forward_speed = HACKATHON_FORWARD_SPEED_M_S
+        if args.forward_speed is None:
+            args.forward_speed = HACKATHON_FORWARD_SPEED_M_S
+        args.max_forward_speed = HACKATHON_MAX_FORWARD_SPEED_M_S
         args.lidar_stop_distance = HACKATHON_LIDAR_STOP_DISTANCE_M
         args.telemetry_recovery_timeout = HACKATHON_TELEMETRY_RECOVERY_S
+    if args.forward_speed is None:
+        args.forward_speed = 0.30
     if not 0 < args.forward_speed <= args.max_forward_speed:
         raise ValueError(
             f"forward speed must be in (0, {args.max_forward_speed:.2f}]"
@@ -98,6 +103,9 @@ def config(args) -> PatrolConfig:
     import math
     return PatrolConfig(
         forward_speed_m_s=args.forward_speed,
+        max_forward_speed_m_s=args.max_forward_speed,
+        # Odometry jump checks scale with the commanded speed, never below 0.50.
+        max_physical_speed_m_s=max(0.50, args.forward_speed),
         forward_distance_m=args.forward_distance,
         return_distance_m=args.return_distance,
         home_distance_m=args.home_distance,

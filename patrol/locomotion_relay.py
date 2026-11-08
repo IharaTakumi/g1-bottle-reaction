@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 
-from hackathon_profile import FORWARD_SPEED_M_S as HACKATHON_FORWARD_SPEED_M_S
+from hackathon_profile import MAX_FORWARD_SPEED_M_S as HACKATHON_MAX_FORWARD_SPEED_M_S
 
 
 MAX_VX = 0.30
@@ -36,7 +36,7 @@ def parser():
     value.add_argument("--port", type=int, default=47622)
     value.add_argument("--interface", default="eth0")
     value.add_argument("--watchdog-timeout", type=float, default=0.40)
-    value.add_argument("--max-forward-speed", type=float, choices=(0.30, 0.50),
+    value.add_argument("--max-forward-speed", type=float, choices=(0.30, 0.50, 0.80),
                        default=MAX_VX)
     value.add_argument("--hackathon-runtime", action="store_true")
     value.add_argument("--telemetry-host", default="10.42.0.1")
@@ -170,7 +170,7 @@ def decode(payload, allow_reverse, max_vx=MAX_VX):
 def main(argv=None):
     args = parser().parse_args(argv)
     if args.hackathon_runtime:
-        args.max_forward_speed = HACKATHON_FORWARD_SPEED_M_S
+        args.max_forward_speed = HACKATHON_MAX_FORWARD_SPEED_M_S
     if args.arm and args.telemetry_only:
         raise ValueError("--arm and --telemetry-only are mutually exclusive")
     if not 0.35 <= args.watchdog_timeout <= 0.50:

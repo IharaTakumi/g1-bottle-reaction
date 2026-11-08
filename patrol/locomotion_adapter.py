@@ -17,8 +17,8 @@ class UdpLocomotionAdapter:
     def __init__(self, host: str = "10.42.0.76", port: int = 47622,
                  telemetry_bind: str = "10.42.0.1", telemetry_port: int = 47623,
                  max_forward_speed: float = MAX_SPEED_M_S):
-        if max_forward_speed not in (0.30, 0.50):
-            raise ValueError("max forward speed must be 0.30 or 0.50 m/s")
+        if max_forward_speed not in (0.30, 0.50, 0.80):
+            raise ValueError("max forward speed must be 0.30, 0.50 or 0.80 m/s")
         self._max_forward_speed = max_forward_speed
         self._destination = (host, port)
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

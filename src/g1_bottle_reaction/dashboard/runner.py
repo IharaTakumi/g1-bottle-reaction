@@ -33,7 +33,20 @@ RELAY_PORT = 47622
 # from a Patrol that did not stop; the relay watchdog then holds STOP.
 ESTOP_SEQUENCE_BASE = 10 ** 15
 LONG_JOBS = {"dry", "stand", "run"}
-JOBS = LONG_JOBS | {"check", "worker", "motion", "stop"}
+JOBS = LONG_JOBS | {"check", "worker", "motion", "stop", "relays"}
+SPEED_RANGE = (0.10, 0.80)
+VALIDATED_SPEED = 0.50
+COURSE_RANGE = (1.0, 5.0)
+
+
+def run_settings(params: dict) -> list[str]:
+    speed = float(params.get("speed", VALIDATED_SPEED))
+    course = float(params.get("course", 4.0))
+    if not SPEED_RANGE[0] <= speed <= SPEED_RANGE[1]:
+        raise ValueError("speed must be 0.10 to 0.80 m/s")
+    if not COURSE_RANGE[0] <= course <= COURSE_RANGE[1]:
+        raise ValueError("course must be 1 to 5 m")
+    return ["--speed", f"{speed:g}", "--course", f"{course:g}"]
 CONFIRMED_JOBS = {"stand", "run", "motion"}
 
 
@@ -68,11 +81,11 @@ def job_arguments(kind: str, params: dict) -> list[str]:
             minutes = float(params["minutes"])
             if not 0 < minutes <= 30:
                 raise ValueError("minutes must be within (0, 30]")
-            return ["--minutes", f"{minutes:g}", "--yes"]
+            return ["--minutes", f"{minutes:g}", *run_settings(params), "--yes"]
         laps = int(params.get("laps", 3))
         if not 1 <= laps <= 100:
             raise ValueError("laps must be 1 to 100")
-        return ["--laps", str(laps), "--yes"]
+        return ["--laps", str(laps), *run_settings(params), "--yes"]
     if kind == "motion":
         name = str(params.get("name", ""))
         if name not in g1_game.GAME_REACTIONS:
@@ -183,6 +196,41 @@ class Dashboard:
             self.note(f"{kind} を終了しました")
             return {"ok": True}
         return {"ok": False, "error": "nothing to stop"}
+
+    def change_settings(self, params: dict) -> dict:
+        """Speed and course for the next loop of the running game."""
+        if not (self.job and self.job["kind"] == "run" and self.running()):
+            raise RuntimeError("the game is not running")
+        request = {"operation": "settings"}
+        if params.get("speed") not in (None, ""):
+            request["speed_m_s"] = float(params["speed"])
+        if params.get("course") not in (None, ""):
+            request["course_length_m"] = float(params["course"])
+        try:
+            reply = patrol_request(PATROL_SOCKET, request, timeout=1.0)
+        except OSError as exc:
+            raise RuntimeError(f"patrol did not answer ({exc})") from exc
+        if not reply.get("ok"):
+            raise ValueError(str(reply.get("error")))
+        self.note("設定変更（次の周から）: " + ", ".join(f"{k}={v}" for k, v in request.items() if k != "operation"))
+        return {"ok": True, "pending": reply.get("pending_settings")}
+
+    def set_volume(self, level) -> dict:
+        """G1 speaker volume; applies to the next sound at once, game or not."""
+        level = int(level)
+        if not 0 <= level <= 100:
+            raise ValueError("volume must be 0 to 100")
+
+        def apply() -> None:
+            result = subprocess.run([self.python, "-u", str(self.root / "scripts" / "g1_game.py"), "volume", str(level)],
+                                    cwd=self.root, capture_output=True, text=True, timeout=60)
+            line = (result.stdout.strip().splitlines() or ["no output"])[-1]
+            self.note(f"音量 {level}: " + ("変更しました" if result.returncode == 0 else "変更できませんでした（" + line + "）"),
+                      warn=result.returncode != 0)
+
+        threading.Thread(target=apply, daemon=True).start()
+        self.note(f"音量を {level} に変更中…")
+        return {"ok": True}
 
     def emergency_stop(self) -> dict:
         """Stop walking now through every path; never cut the arms' power."""

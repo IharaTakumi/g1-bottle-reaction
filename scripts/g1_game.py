@@ -98,7 +98,7 @@ def check() -> int:
     results.append(("no game running on PC", WARN if busy else OK, busy[:80] or "clear"))
     remote = ssh(
         f"sed -n 2p {RUNTIME}/BUNDLE_INFO.txt; ls /dev/v4l/by-id/ 2>/dev/null | head -2; "
-        f"sha256sum {RELAY_DIR}/locomotion_relay.py {RELAY_DIR}/lidar_guard_relay.py | cut -c1-12; "
+        f"cd {RELAY_DIR} && sha256sum {' '.join(RELAY_FILES)} | cut -c1-12; cd; "
         f"pgrep -fa '[l]ocomotion_relay|[r]un_patrol' | head -2", timeout=25)
     if remote.returncode != 0:
         results.append(("SSH", FAIL, remote.stderr.strip()[:90] or "no response"))
@@ -111,9 +111,10 @@ def check() -> int:
         results.append(("camera", OK if any("video-index" in x for x in lines) else WARN,
                         next((x for x in lines if "video-index0" in x), "no USB camera; will try the video service")))
         local = [subprocess.run(["sha256sum", str(ROOT / "patrol" / f)], capture_output=True, text=True).stdout[:12]
-                 for f in ("locomotion_relay.py", "lidar_guard_relay.py")]
+                 for f in RELAY_FILES]
         remote_hashes = [x for x in lines if re.fullmatch(r"[0-9a-f]{12}", x)]
-        results.append(("walking relays on G1", OK if remote_hashes == local else FAIL, "match" if remote_hashes == local else "differ"))
+        results.append(("walking relays on G1", OK if remote_hashes == local else FAIL,
+                        "match" if remote_hashes == local else "differ: run the relays command when G1 is free"))
         state = ssh(f"cd {RUNTIME}/code && PYTHONPATH={RUNTIME}/deps:scripts:/home/unitree/unitree_sdk2_python "
                     "LD_LIBRARY_PATH=/home/unitree/work/unitree_sdk2/thirdparty/lib/aarch64 python3 -B -",
                     timeout=30, stdin=STATE_PROBE)
@@ -226,6 +227,57 @@ def motion(name: str, assume_yes: bool, voice: str | None = None) -> int:
         return 1
 
 
+VOLUME_PROBE = """
+import contextlib, json, sys, xml.etree.ElementTree as ET
+with contextlib.redirect_stdout(sys.stderr):
+    import unitree_sdk2py.core.channel as channel
+    from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
+    original = channel.ChannelConfigHasInterface
+    root = ET.fromstring(original)
+    for parent in root.iter():
+        for child in list(parent):
+            if child.tag == "Tracing":
+                parent.remove(child)
+    channel.ChannelConfigHasInterface = ET.tostring(root, encoding="unicode")
+    channel.ChannelFactoryInitialize(0, "eth0")
+    client = AudioClient(); client.SetTimeout(2.0); client.Init()
+    level = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    code = client.SetVolume(level) if level is not None else 0
+    read_code, value = client.GetVolume()
+print("VOLUME=" + json.dumps({"set_code": code, "read_code": read_code, "volume": value}))
+"""
+
+
+def volume(level: int | None) -> int:
+    """Read or set the G1 speaker volume; it applies to the next sound at once."""
+    if level is not None and not 0 <= level <= 100:
+        print("REFUSED: volume must be 0-100")
+        return 1
+    argument = "" if level is None else f" {level}"
+    result = ssh(f"PYTHONPATH=/home/unitree/unitree_sdk2_python python3 -B -{argument}",
+                 timeout=30, stdin=VOLUME_PROBE)
+    found = re.search(r"^VOLUME=(.*)$", result.stdout, re.M)
+    print(found.group(0) if found else "VOLUME FAILED: " + (result.stderr.strip()[-200:] or "no response"))
+    return 0 if found and json.loads(found.group(1))["read_code"] == 0 else 1
+
+
+RELAY_FILES = ("locomotion_relay.py", "lidar_guard_relay.py", "lidar_guard.py", "hackathon_profile.py")
+
+
+def deploy_relays() -> int:
+    """Copy the walking relays to G1; refuses while a relay is running there."""
+    running = ssh(f"pgrep -f '[{RELAY_MARKER[0]}]{RELAY_MARKER[1:]}' | head -1; true", timeout=15).stdout.strip()
+    if running:
+        print("REFUSED: the walking relays are running on G1; stop the game first")
+        return 1
+    copied = subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
+                             *[str(ROOT / "patrol" / name) for name in RELAY_FILES],
+                             f"{SSH_TARGET}:{RELAY_DIR}/"], capture_output=True, text=True, timeout=60)
+    print("RELAYS=" + ("copied " + ", ".join(RELAY_FILES) if copied.returncode == 0
+                       else "FAILED " + copied.stderr.strip()[-200:]))
+    return copied.returncode
+
+
 def relay_commands(pc_ip: str) -> dict[str, list[str]]:
     return {
         "lidar_guard_relay": ["--interface", "eth0", "--destination", pc_ip, "--port", "47621",
@@ -258,9 +310,11 @@ def stop_relays() -> None:
         f"pkill -KILL -f '[{RELAY_MARKER[0]}]{RELAY_MARKER[1:]}'; true", timeout=20)
 
 
-def supervisor_args(mode: list[str], duration: float, laps: int = 1) -> list[str]:
+def supervisor_args(mode: list[str], duration: float, laps: int = 1,
+                    speed: float = 0.50, course: float = 4.0) -> list[str]:
     return [PYTHON, "-B", str(ROOT / "scripts/run_integrated_demo.py"), *mode, "--headless",
-            "--duration", str(duration), "--laps", str(laps), "--ssh-target", SSH_TARGET,
+            "--duration", str(duration), "--laps", str(laps), "--speed", f"{speed:g}",
+            "--course-length", f"{course:g}", "--ssh-target", SSH_TARGET,
             "--patrol-host", LAN_HOST, "--yolo-model", str(YOLO_MODEL)]
 
 
@@ -326,8 +380,13 @@ def confirmed(summary: str, assume_yes: bool, read=input) -> bool:
         return False
 
 
-def run(laps: int | None, minutes: float | None, assume_yes: bool) -> int:
+def run(laps: int | None, minutes: float | None, assume_yes: bool,
+        speed: float = 0.50, course: float = 4.0) -> int:
     loops, duration, summary = run_plan(laps, minutes)
+    if not 0.10 <= speed <= 0.80 or not 1.0 <= course <= 5.0:
+        print("REFUSED: speed must be 0.10-0.80 m/s and course 1-5 m")
+        return 1
+    summary += f", {speed:g} m/s" + (" (above the validated 0.50 m/s)" if speed > 0.50 else "") + f", course {course:g} m"
     if check() != 0:
         print("REFUSED: fix the FAIL items first")
         return 1
@@ -345,7 +404,7 @@ def run(laps: int | None, minutes: float | None, assume_yes: bool) -> int:
         if started.returncode != 0:
             return 1
         return subprocess.run(
-            supervisor_args(["--real-patrol", "--operator-approved-real-patrol"], duration, loops),
+            supervisor_args(["--real-patrol", "--operator-approved-real-patrol"], duration, loops, speed, course),
             cwd=ROOT).returncode
     finally:
         stop_relays()
@@ -385,6 +444,11 @@ def parser() -> argparse.ArgumentParser:
     group.add_argument("--laps", type=int)
     group.add_argument("--minutes", type=float)
     run_parser.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+    run_parser.add_argument("--speed", type=float, default=0.50, help="m/s, 0.10-0.80 (0.50 validated)")
+    run_parser.add_argument("--course", type=float, default=4.0, help="course length end to end, 1-5 m")
+    volume_parser = commands.add_parser("volume", help="read or set the G1 speaker volume (0-100)")
+    volume_parser.add_argument("level", nargs="?", type=int)
+    commands.add_parser("relays", help="copy this PC's walking relays to G1 (does not start them)")
     commands.add_parser("stop", help="stop everything and release the robot")
     return value
 
@@ -402,7 +466,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "stand":
         return stand(args.duration, args.yes)
     if args.command == "run":
-        return run(args.laps, args.minutes, args.yes)
+        return run(args.laps, args.minutes, args.yes, args.speed, args.course)
+    if args.command == "volume":
+        return volume(args.level)
+    if args.command == "relays":
+        return deploy_relays()
     return stop()
 
 

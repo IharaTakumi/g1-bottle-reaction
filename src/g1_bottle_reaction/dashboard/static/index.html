@@ -64,6 +64,7 @@ summary { cursor: pointer; font-weight: 700; }
 .pool h3 { font-size: 14px; margin: 0 0 4px; }
 .pool ul { margin: 0; padding-left: 18px; }
 .pool li.failed { color: var(--bad); }
+.speed-warn { color: var(--warn); font-weight: 600; margin: 4px 0 0; min-height: 1em; }
 #toast { position: fixed; right: 16px; bottom: 16px; max-width: 420px; padding: 10px 14px; background: var(--ink);
   color: #fff; display: none; z-index: 10; }
 </style>
@@ -149,6 +150,8 @@ summary { cursor: pointer; font-weight: 700; }
           <button data-job="check">状態を確認</button>
           <button data-job="worker">ワーカー起動</button>
         </div>
+        <div class="row"><button data-job="relays" id="relays">G1 の歩行中継を更新</button></div>
+        <p>「状態を確認」で「walking relays on G1: differ」と出たときだけ押します（このPCの中継のファイルを G1 に置き直す。歩きません）。</p>
       </fieldset>
       <fieldset>
         <legend>2. 調整（その場リアクション）</legend>
@@ -170,6 +173,9 @@ summary { cursor: pointer; font-weight: 700; }
           <label><input type="radio" name="run-kind" value="minutes"> 分</label>
           <input type="number" id="run-minutes" value="5" min="1" max="30">
         </div>
+        <div class="row">速度 <input type="number" id="run-speed" value="0.5" min="0.1" max="0.8" step="0.05"> m/s
+          コースの長さ <input type="number" id="run-course" value="4" min="1" max="5" step="0.5"> m</div>
+        <p class="speed-warn" id="run-speed-warn"></p>
         <div class="checks" id="checklist">
           <label><input type="checkbox"> リモコンを持つ人がいて、手に持っている</label>
           <label><input type="checkbox"> コースと G1 の周りに人がいない</label>
@@ -195,9 +201,17 @@ summary { cursor: pointer; font-weight: 700; }
       <p class="note" id="motion-when"></p>
       <div class="row"><button id="motion-play">再生</button></div>
     </details>
-    <details>
-      <summary>本番中の設定変更（速度・距離・音量）</summary>
-      <p class="note">次の段階で対応します。速度は最大 0.8 m/s（0.5 m/s を超えると未検証）、距離は 1〜5 m、音量は 0〜100 で、変えた値は次の周から効きます。</p>
+    <details id="settings" open>
+      <summary>設定変更（速度・コースの長さ・音量）</summary>
+      <p class="note">速度とコースの長さは本番の実行中だけ変えられ、<b>次の周の開始時から</b>効きます（周の途中では変わりません）。
+        コースはスタートを中心に、片側へ半分 → 反対の端まで全長 → スタートへ半分、と歩きます。音量はいつでも変えられ、次に鳴る音からすぐ効きます。</p>
+      <div class="row">今の設定: <span id="current-settings">—</span></div>
+      <div class="row">速度 <input type="number" id="set-speed" value="0.5" min="0.1" max="0.8" step="0.05"> m/s
+        コースの長さ <input type="number" id="set-course" value="4" min="1" max="5" step="0.5"> m
+        <button id="settings-apply">次の周から反映</button></div>
+      <p class="speed-warn" id="set-speed-warn"></p>
+      <div class="row">音量 <input type="number" id="set-volume" value="100" min="0" max="100" step="5">
+        <button id="volume-apply">音量を変える</button></div>
     </details>
   </section>
 
@@ -255,18 +269,30 @@ document.querySelectorAll("button[data-job]").forEach((button) => button.onclick
     return act("stand", {duration: Number($("stand-duration").value), confirm: true});
   }
   if (job === "dry") return act("dry", {duration: Number($("dry-duration").value)});
+  if (job === "relays" && !confirm("このPCの歩行中継のファイルを G1 に置き直します（G1 は動きません）。他の人が G1 を使っていないことを確認しましたか？")) return;
   if (job === "run") {
     const boxes = [...document.querySelectorAll("#checklist input")];
     if (!boxes.every((b) => b.checked)) return toast("開始前チェックをすべて確認してください");
     const byMinutes = document.querySelector("input[name=run-kind]:checked").value === "minutes";
-    const plan = byMinutes ? $("run-minutes").value + " 分" : $("run-laps").value + " 周";
-    if (!confirm(`G1 が歩きます（${plan}）。コースに人がいないこと、リモコンを持っていることを確認しましたか？`)) return;
+    const speed = Number($("run-speed").value), course = Number($("run-course").value);
+    const plan = (byMinutes ? $("run-minutes").value + " 分" : $("run-laps").value + " 周") + `、${speed} m/s、コース ${course} m`;
+    const extra = speed > 0.5 ? "\n" + speedWarning(speed) : "";
+    if (!confirm(`G1 が歩きます（${plan}）。コースに人がいないこと、リモコンを持っていることを確認しましたか？${extra}`)) return;
     boxes.forEach((b) => b.checked = false);
-    return act("run", byMinutes ? {minutes: Number($("run-minutes").value), confirm: true}
-                                : {laps: Number($("run-laps").value), confirm: true});
+    const base = {speed, course, confirm: true};
+    return act("run", byMinutes ? {...base, minutes: Number($("run-minutes").value)}
+                                : {...base, laps: Number($("run-laps").value)});
   }
   return act(job);
 });
+const speedWarning = (v) => Number(v) > 0.5 ? `${Number(v).toFixed(2)} m/s は実機で未検証です（確かめたのは 0.5 m/s まで）。止まるまでに進む距離が長くなります。` : "";
+["run-speed", "set-speed"].forEach((id) => $(id).oninput = () => $(id + "-warn").textContent = speedWarning($(id).value));
+$("settings-apply").onclick = () => {
+  const speed = Number($("set-speed").value), course = Number($("set-course").value);
+  const extra = speed > 0.5 ? "\n" + speedWarning(speed) : "";
+  if (confirm(`次の周から 速度 ${speed} m/s、コース ${course} m にします。${extra}`)) act("settings", {speed, course});
+};
+$("volume-apply").onclick = () => act("volume", {level: Number($("set-volume").value)});
 function triggersOf(motion) {
   const pools = (state && state.catalog && state.catalog.pools) || {};
   return Object.entries(pools).filter(([, list]) => list.some((e) => e.motion === motion)).map(([t]) => t);
@@ -346,7 +372,7 @@ function render(s) {
   chip("chip-telemetry", mode !== "run" ? "" : age === undefined || age === null ? "bad" : age < 0.2 ? "ok" : age < 0.5 ? "warn" : "bad",
        mode !== "run" ? "—" : age === null || age === undefined ? "なし" : fmt(age * 1000, 0, " ms"));
   const guard = patrol.guard || {};
-  const front = guard.front_state;
+  const front = mode === "run" ? guard.front_state : null;
   chip("chip-lidar", !front ? "" : front === "CLEAR" ? "ok" : front === "BLOCKED" ? "bad" : "warn", STATE_JA[front] || "—");
   const frameFresh = s.frame_age_s !== null && s.frame_age_s < 1.0;
   chip("chip-camera", frameFresh ? "ok" : running && ["dry", "stand", "run"].includes(mode) ? "warn" : "", frameFresh ? "映像あり" : "—");
@@ -355,6 +381,11 @@ function render(s) {
   $("motion-play").disabled = running || worker.state !== "READY";
   $("finish").disabled = !(running && ["dry", "stand", "run"].includes(mode));
   $("release").disabled = running && !["dry", "stand", "run"].includes(mode);
+  $("settings-apply").disabled = mode !== "run";
+  const route = patrol.route, pending = patrol.pending_settings;
+  $("current-settings").textContent = mode !== "run" || !route ? "本番の実行中に表示" :
+    `速度 ${fmt(route.speed_m_s, 2, " m/s")}、コース ${fmt(route.return_m, 1, " m")}`
+    + (pending ? `（次の周から: ${pending.speed_m_s !== undefined ? pending.speed_m_s + " m/s " : ""}${pending.course_length_m !== undefined ? "コース " + pending.course_length_m + " m" : ""}）` : "");
 
   $("outdated").style.display = (!s.catalog || s.server_outdated) ? "block" : "none";
   const select = $("motion-name");

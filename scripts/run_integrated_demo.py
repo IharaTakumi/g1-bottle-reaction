@@ -72,6 +72,10 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument("--duration", type=float, default=30.0)
     value.add_argument("--laps", type=int, default=1, help="Patrol loops before finishing")
+    value.add_argument("--speed", type=float, default=0.50,
+                       help="forward speed in m/s (0.10-0.80; only 0.50 is validated on G1)")
+    value.add_argument("--course-length", type=float, default=4.0,
+                       help="course length end to end in m (1-5); out half, back full, home half")
     value.add_argument(
         "--patrol-host",
         help="G1 address for the UDP Patrol relays when SSH uses another route",
@@ -156,8 +160,9 @@ def patrol_command(args: argparse.Namespace) -> list[str]:
         "--locomotion-relay-host", host,
         "--locomotion-relay-port", "47622",
         "--locomotion-telemetry-bind", local_ip,
-        "--forward-distance", "2.0", "--return-distance", "4.0",
-        "--home-distance", "2.0",
+        "--forward-speed", f"{args.speed:g}",
+        "--forward-distance", f"{args.course_length / 2:g}", "--return-distance", f"{args.course_length:g}",
+        "--home-distance", f"{args.course_length / 2:g}",
         "--turn-yaw-rate", "0.50", "--max-lateral-drift", "0.80",
         "--heading-hold", "--loops", str(args.laps), "--arm", "--one-cycle",
         "--operator-approved-one-cycle",
@@ -308,6 +313,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--laps must be within 1..100")
     if args.real_patrol and not args.operator_approved_real_patrol:
         raise SystemExit("--real-patrol requires --operator-approved-real-patrol")
+    if not 0.10 <= args.speed <= 0.80:
+        raise SystemExit("--speed must be within 0.10..0.80 m/s")
+    if not 1.0 <= args.course_length <= 5.0:
+        raise SystemExit("--course-length must be within 1..5 m")
     if args.no_locomotion and args.operator_approved_real_patrol:
         raise SystemExit("real Patrol approval is invalid with --no-locomotion")
 

@@ -64,15 +64,17 @@ def test_manual_motion_keeps_its_voice():
 
 
 def test_job_arguments_are_bounded():
-    assert runner.job_arguments("run", {"laps": 3}) == ["--laps", "3", "--yes"]
-    assert runner.job_arguments("run", {"minutes": 5}) == ["--minutes", "5", "--yes"]
+    assert runner.job_arguments("run", {"laps": 3}) == ["--laps", "3", "--speed", "0.5", "--course", "4", "--yes"]
+    assert runner.job_arguments("run", {"minutes": 5, "speed": 0.8, "course": 2}) == [
+        "--minutes", "5", "--speed", "0.8", "--course", "2", "--yes"]
     assert runner.job_arguments("stand", {"duration": 90}) == ["--duration", "90", "--yes"]
     assert runner.job_arguments("motion", {"name": "salute"}) == ["salute", "--yes"]
     assert runner.job_arguments("motion", {"name": "salute", "voice": "person/person_salute_1.wav"}) == [
         "salute", "--voice", "person/person_salute_1.wav", "--yes"]
     for kind, params in [("run", {"laps": 0}), ("run", {"minutes": 31}), ("dry", {"duration": 1}),
                          ("motion", {"name": "rm -rf"}), ("walk", {}),
-                         ("motion", {"name": "salute", "voice": "banana/banana_surprise_1.wav"})]:
+                         ("motion", {"name": "salute", "voice": "banana/banana_surprise_1.wav"}),
+                         ("run", {"laps": 1, "speed": 0.85}), ("run", {"laps": 1, "course": 6})]:
         with pytest.raises(ValueError):
             runner.job_arguments(kind, params)
 
@@ -142,3 +144,62 @@ def test_only_the_dashboard_page_can_send_commands():
         assert fake.started == ["check"]
     finally:
         server.shutdown()
+
+
+def patrol(**config):
+    time = VirtualTime()
+    lines = []
+    controller = PatrolController(DryRunLocomotionAdapter(), AlwaysClear(),
+                                  PatrolConfig(max_forward_speed_m_s=0.8, **config),
+                                  clock=time.clock, sleep=time.sleep, emit=lines.append)
+    return controller, lines
+
+
+def test_settings_wait_for_the_next_loop():
+    controller, lines = patrol()
+    seen = []
+    original = controller._run_forward
+
+    def forward(state, target):
+        seen.append((controller._loops_completed, state.value, target, controller.config.forward_speed_m_s))
+        if controller._loops_completed == 0 and state.value == "FORWARD_RETURN":
+            controller.request_settings(speed_m_s=0.8, course_length_m=2.0)
+        original(state, target)
+    controller._run_forward = forward
+    controller.run(cycles=2)
+    first = [entry for entry in seen if entry[0] == 0]
+    second = [entry for entry in seen if entry[0] == 1]
+    assert {entry[3] for entry in first} == {0.30} and first[1][2] == 4.0
+    assert [entry[2] for entry in second] == [1.0, 2.0, 1.0] and {entry[3] for entry in second} == {0.8}
+    assert controller.config.max_physical_speed_m_s == 0.8
+    assert any("SETTINGS applied" in line for line in lines)
+
+
+def test_settings_reject_values_outside_the_limits():
+    controller, _ = patrol()
+    for bad in ({"speed_m_s": 0.81}, {"speed_m_s": 0.05}, {"course_length_m": 0.5}, {"course_length_m": 5.5}, {}):
+        with pytest.raises(ValueError):
+            controller.request_settings(**bad)
+    assert controller.control_status()["pending_settings"] is None
+
+
+def test_patrol_ipc_reports_the_request_error(tmp_path):
+    from control_ipc import PatrolControlServer, request
+    controller, _ = patrol()
+    controller._last_error = "older failure"
+    server = PatrolControlServer(tmp_path / "p.sock", controller)
+    server.start()
+    try:
+        reply = request(tmp_path / "p.sock", {"operation": "settings", "speed_m_s": 2.0})
+    finally:
+        server.close()
+    assert reply["ok"] is False and "speed must be" in reply["error"]
+
+
+def test_relay_accepts_the_new_speed_limit_only_up_to_0_8():
+    from locomotion_relay import decode
+    assert decode('{"seq": 1, "vx": 0.8, "vy": 0, "vyaw": 0}', False, 0.80)[1] == "move"
+    with pytest.raises(ValueError):
+        decode('{"seq": 2, "vx": 0.81, "vy": 0, "vyaw": 0}', False, 0.80)
+    with pytest.raises(ValueError):
+        decode('{"seq": 3, "vx": 0.6, "vy": 0, "vyaw": 0}', False, 0.50)

@@ -131,3 +131,19 @@ def test_voice_must_be_a_reaction_wav_inside_the_voice_folder():
     for bad in ("../../README.md", "person/../../x.wav", "person/missing.wav"):
         with pytest.raises(ValueError):
             game.voice_path(bad)
+
+
+def test_course_length_sets_a_closed_route(monkeypatch):
+    monkeypatch.setattr(demo, "route_to", lambda _host: ("eth0", "192.168.0.10"))
+    args = demo.parser().parse_args(["--real-patrol", "--operator-approved-real-patrol", "--ssh-target", "u@h",
+                                     "--patrol-host", "192.168.0.82", "--speed", "0.7", "--course-length", "3"])
+    command = demo.patrol_command(args)
+    value = lambda flag: command[command.index(flag) + 1]
+    assert (value("--forward-speed"), value("--forward-distance"), value("--return-distance"),
+            value("--home-distance")) == ("0.7", "1.5", "3", "1.5")
+
+
+def test_volume_and_run_limits_are_checked_before_contacting_g1(capsys):
+    assert game.volume(101) == 1
+    assert game.run(1, None, True, speed=0.9) == 1
+    assert "REFUSED" in capsys.readouterr().out
