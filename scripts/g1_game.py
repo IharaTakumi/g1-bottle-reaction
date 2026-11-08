@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shlex
 import shutil
 import subprocess
@@ -193,9 +194,6 @@ def motion(name: str, assume_yes: bool, voice: str | None = None) -> int:
     if busy:
         print("REFUSED: a game or standing session is running on this PC")
         return 1
-    if worker_status().get("state") != "READY":
-        print("REFUSED: resident worker is not READY; run the worker command")
-        return 1
     if not assume_yes:
         try:
             if input(f"G1 ARMS WILL MOVE ({name}). Type ARMS to start: ").strip() != "ARMS":
@@ -203,28 +201,61 @@ def motion(name: str, assume_yes: bool, voice: str | None = None) -> int:
                 return 1
         except EOFError:
             return 1
-    speaker, playing = None, None
-    if sound is not None:
-        # Connect the speaker first so the voice starts with the motion, as in the game.
-        from g1_bottle_reaction.adapters.cached_audio import G1SshAudioOutput
-        speaker = G1SshAudioOutput(SSH_TARGET)
-        speaker.initialize()
-        playing = threading.Thread(target=speaker.play_wav, args=(sound,), daemon=True)
-        playing.start()
-        print(f"Audio triggered: {sound}; monotonic={time.monotonic():.6f}", flush=True)
+    # As in the game: connect the speaker and the worker link first, then send
+    # the voice and the motion together, so only the arm hand-over ramp separates them.
+    bridge = WorkerBridge()
+    speaker = None
     try:
-        result = ssh(f"cd {RUNTIME}/code && PYTHONPATH={RUNTIME}/deps:scripts python3 -B "
-                     f"scripts/resident_worker_client.py --timeout 40 {shlex.quote(name)} 2>/dev/null | tail -1",
-                     timeout=60)
+        status = bridge.request({"operation": "status"}, timeout=20)
+        if status.get("state") != "READY":
+            print(f"REFUSED: resident worker is {status.get('state', 'not reachable')}")
+            return 1
+        if sound is not None:
+            from g1_bottle_reaction.adapters.cached_audio import G1SshAudioOutput
+            speaker = G1SshAudioOutput(SSH_TARGET)
+            speaker.initialize()
+            threading.Thread(target=speaker.play_wav, args=(sound,), daemon=True).start()
+            print(f"Audio triggered: {sound}; monotonic={time.monotonic():.6f}", flush=True)
+        print(f"Motion reaction triggered: motiondecode:{name}; monotonic={time.monotonic():.6f}", flush=True)
+        result = bridge.request({"operation": "execute", "reaction": name,
+                                 "trigger_monotonic_s": time.monotonic()}, timeout=60)
     finally:
+        bridge.close()
         if speaker is not None:
-            playing.join(timeout=20)
             speaker.close()
-    print("MOTIONDECODE RESULT: " + (result.stdout.strip() or "{}"))
-    try:
-        return 0 if json.loads(result.stdout).get("status") == "pass" else 1
-    except json.JSONDecodeError:
-        return 1
+    print("MOTIONDECODE RESULT: " + json.dumps(result, sort_keys=True))
+    return 0 if result.get("status") == "pass" else 1
+
+
+class WorkerBridge:
+    """One SSH link to the resident worker's stdio client, opened before the trigger."""
+
+    def __init__(self) -> None:
+        command = (f"cd {RUNTIME}/code && PYTHONPATH={RUNTIME}/deps:scripts python3 -B "
+                   "scripts/resident_worker_client.py --stdio --timeout 40")
+        self.process = subprocess.Popen(
+            ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "--", SSH_TARGET, command],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+    def request(self, payload: dict, timeout: float) -> dict:
+        self.process.stdin.write(json.dumps(payload) + "\n")
+        self.process.stdin.flush()
+        if not select.select([self.process.stdout], [], [], timeout)[0]:
+            raise RuntimeError("resident worker did not answer")
+        line = self.process.stdout.readline()
+        if not line:
+            raise RuntimeError("resident worker link closed")
+        return json.loads(line)
+
+    def close(self) -> None:
+        try:
+            self.process.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
 
 
 VOLUME_PROBE = """

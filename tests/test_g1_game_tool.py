@@ -147,3 +147,21 @@ def test_volume_and_run_limits_are_checked_before_contacting_g1(capsys):
     assert game.volume(101) == 1
     assert game.run(1, None, True, speed=0.9) == 1
     assert "REFUSED" in capsys.readouterr().out
+
+
+def test_manual_motion_opens_the_worker_link_before_the_trigger(monkeypatch, capsys):
+    calls = []
+
+    class Bridge:
+        def request(self, payload, timeout):
+            calls.append(payload["operation"])
+            return {"state": "READY"} if payload["operation"] == "status" else {"status": "pass", "reaction": "salute"}
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(game, "WorkerBridge", Bridge)
+    monkeypatch.setattr(game.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": b""})())
+    assert game.motion("salute", assume_yes=True) == 0
+    assert calls == ["status", "execute", "close"]
+    assert "MOTIONDECODE RESULT" in capsys.readouterr().out
