@@ -220,6 +220,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--display", choices=("game", "safety", "both"), help="view shown on this monitor"
     )
+    parser.add_argument(
+        "--frame-output", type=Path,
+        help="also write the annotated view as a JPEG here (about 10 per second) for the dashboard",
+    )
     fullscreen = parser.add_mutually_exclusive_group()
     fullscreen.add_argument("--fullscreen", dest="fullscreen", action="store_true")
     fullscreen.add_argument("--windowed", dest="fullscreen", action="store_false")

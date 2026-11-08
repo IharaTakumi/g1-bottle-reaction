@@ -138,6 +138,9 @@ def reaction_command(args: argparse.Namespace) -> list[str]:
     if args.ssh_control:
         command += ["--ssh-control", args.ssh_control]
     command.append("--headless" if args.headless else "--windowed")
+    # The dashboard shows this annotated view; it does not change any decision.
+    if os.environ.get("G1_GAME_FRAME_OUTPUT"):
+        command += ["--frame-output", os.environ["G1_GAME_FRAME_OUTPUT"]]
     # --with-wander is deliberately absent in both modes.
     return command
 

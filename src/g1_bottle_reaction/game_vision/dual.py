@@ -135,6 +135,19 @@ def reaction_motion_pools(robot) -> dict[str, tuple[str, ...]]:
     return pools
 
 
+FRAME_OUTPUT_PERIOD_S = 0.1
+
+
+def write_frame(path: Path, image) -> None:
+    """Atomically replace the dashboard's latest annotated JPEG."""
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    if not ok:
+        return
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(encoded.tobytes())
+    os.replace(temporary, path)
+
+
 def letterbox(frame, width, height):
     if width <= 0 or height <= 0 or frame.ndim != 3 or frame.shape[2] != 3:
         raise ValueError("invalid display dimensions")
@@ -395,6 +408,11 @@ def run(args):
     found_label = None
     boxes = True
     detection = None
+    frame_output = getattr(args, "frame_output", None)
+    if frame_output is not None:
+        frame_output = Path(frame_output)
+        frame_output.parent.mkdir(parents=True, exist_ok=True)
+    last_frame_output = 0.
     usb_sender = g1_sender = None
     opened = False
     stopped_sender_reported = False
@@ -714,6 +732,15 @@ def run(args):
             if g1_sender is not None and g1_sender.poll() is not None:
                 print(f"G1 camera sender exited: {g1_sender.returncode}", flush=True)
                 g1_sender = None
+            if frame_output is not None and now - last_frame_output >= FRAME_OUTPUT_PERIOD_S:
+                last_frame_output = now
+                try:
+                    write_frame(frame_output, compose(states, mode, now, usb_rotate=args.usb_rotate,
+                                                      detection=detection, boxes=boxes,
+                                                      found_label=found_label))
+                except OSError as exc:
+                    print(f"FRAME OUTPUT FAILED: {exc}", flush=True)
+                    frame_output = None
             if opened:
                 cv2.imshow(window, compose(states, mode, now, usb_rotate=args.usb_rotate,
                                           detection=detection, boxes=boxes, found_label=found_label))

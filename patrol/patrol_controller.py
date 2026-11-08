@@ -81,6 +81,10 @@ class PatrolController:
         self._turn_remaining_rad: float | None = None
         self._last_stop_sent_monotonic: float | None = None
         self._forward_leg_id = 0
+        self._finish_requested = threading.Event()
+        self._loops_completed = 0
+        self._loops_target: int | None = None
+        self._origin: dict[str, float] | None = None
 
     def pause(self) -> None:
         self._pause_requested.set()
@@ -148,9 +152,49 @@ class PatrolController:
             raise
         return self.control_status()
 
+    def request_finish(self) -> dict[str, object]:
+        """Stop walking after the current loop returns home."""
+        self._finish_requested.set()
+        self.emit("[patrol] FINISH REQUESTED -> stop after this loop")
+        return self.control_status()
+
     def control_status(self) -> dict[str, object]:
+        status = self._control_fields()
+        status.update(self._observation())
+        return status
+
+    def _observation(self) -> dict[str, object]:
+        """Pose and LiDAR for the operator display; never used for control."""
+        try:
+            sample = self.locomotion.odom_sample()
+        except Exception:
+            sample = None
+        odom = None
+        if sample and sample.get("odom_x") is not None:
+            odom = {"x": sample.get("odom_x"), "y": sample.get("odom_y"),
+                    "yaw": sample.get("odom_yaw"), "transport_age_s": sample.get("transport_age"),
+                    "ready": sample.get("odom_ready"), "imu_age_s": sample.get("imu_age")}
+        snapshot = getattr(self.guard, "snapshot", None)
+        try:
+            guard = snapshot() if callable(snapshot) else None
+        except Exception:
+            guard = None
+        return {
+            "odom": odom,
+            "origin": self._origin,
+            "guard": guard,
+            "route": {"forward_m": self.config.forward_distance_m,
+                      "return_m": self.config.return_distance_m,
+                      "home_m": self.config.home_distance_m,
+                      "speed_m_s": self.config.forward_speed_m_s},
+        }
+
+    def _control_fields(self) -> dict[str, object]:
         with self._control_lock:
             return {
+                "loops_completed": self._loops_completed,
+                "loops_target": self._loops_target,
+                "finish_requested": self._finish_requested.is_set(),
                 "state": self.state.value,
                 "phase": self._active_state.value,
                 "paused": self._paused.is_set(),
@@ -178,6 +222,11 @@ class PatrolController:
             ("forward", PatrolState.FORWARD_HOME, self.config.home_distance_m),
         )
         completed = 0
+        self._loops_target = cycles
+        start = self.locomotion.odom_sample()
+        if start and start.get("odom_x") is not None:
+            self._origin = {"x": float(start["odom_x"]), "y": float(start["odom_y"]),
+                            "yaw": float(start["odom_yaw"])}
         try:
             while cycles is None or completed < cycles:
                 for kind, state, target in stages:
@@ -190,7 +239,11 @@ class PatrolController:
                     self._checkpoint_reaction_pause()
                     self.sleep(self.config.settle_s)
                 completed += 1
+                self._loops_completed = completed
                 self.emit(f"[patrol] loop complete count={completed}")
+                if self._finish_requested.is_set():
+                    self.emit("[patrol] FINISH -> loop complete, stopping")
+                    break
         except Exception as exc:
             self._record_failure(exc)
             raise

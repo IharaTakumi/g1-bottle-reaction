@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Operate the G1 sneaking game: check, worker, dry, run, stop.
+"""Operate the G1 sneaking game: check, worker, dry, stand, motion, run, stop.
 
 Only `run` walks the robot, and it needs a typed confirmation or --yes.
+`stand` moves the arms and speaks on detections while G1 stays in place.
 SSH (camera, reactions) uses Tailscale, which has no stalls on the G1 link; the
 UDP walking relays stay on the LAN. Override with G1_SSH_TARGET and G1_LAN_HOST.
 """
@@ -16,6 +17,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -153,6 +156,76 @@ def start_worker() -> int:
     return 0 if status.get("state") == "READY" else 1
 
 
+VOICES = ROOT / "assets/audio/reactions"
+
+
+def reaction_catalog() -> dict:
+    """Which motions each detection can trigger in the game, with their paired voices."""
+    from g1_bottle_reaction.game_vision.dual import REACTION_MOTION_POOLS
+    pools = {target: [{"motion": name,
+                       "voices": sorted(f"{target}/{p.name}" for p in (VOICES / target).glob(f"{target}_{name}_*.wav"))}
+                      for name in names]
+             for target, names in REACTION_MOTION_POOLS.items()}
+    used = {name for names in REACTION_MOTION_POOLS.values() for name in names}
+    return {"pools": pools, "unused": sorted(GAME_REACTIONS - used)}
+
+
+def voice_path(voice: str) -> Path:
+    """A paired reaction voice, given as <target>/<file>.wav; nothing outside that folder."""
+    path = (VOICES / voice).resolve()
+    if path.parent.parent != VOICES.resolve() or path.suffix != ".wav" or not path.is_file():
+        raise ValueError(f"unknown voice {voice}")
+    return path
+
+
+def motion(name: str, assume_yes: bool, voice: str | None = None) -> int:
+    """Play one reaction motion on the standing G1, with or without a voice; no walking."""
+    if name not in GAME_REACTIONS:
+        print(f"REFUSED: unknown motion {name}; choose from {sorted(GAME_REACTIONS)}")
+        return 1
+    try:
+        sound = voice_path(voice) if voice else None
+    except ValueError as exc:
+        print(f"REFUSED: {exc}")
+        return 1
+    busy = subprocess.run(["pgrep", "-f", "[r]un_patrol.py|[g]1_dual_camera.py"], capture_output=True).stdout
+    if busy:
+        print("REFUSED: a game or standing session is running on this PC")
+        return 1
+    if worker_status().get("state") != "READY":
+        print("REFUSED: resident worker is not READY; run the worker command")
+        return 1
+    if not assume_yes:
+        try:
+            if input(f"G1 ARMS WILL MOVE ({name}). Type ARMS to start: ").strip() != "ARMS":
+                print("CANCELLED: no G1 command sent")
+                return 1
+        except EOFError:
+            return 1
+    speaker, playing = None, None
+    if sound is not None:
+        # Connect the speaker first so the voice starts with the motion, as in the game.
+        from g1_bottle_reaction.adapters.cached_audio import G1SshAudioOutput
+        speaker = G1SshAudioOutput(SSH_TARGET)
+        speaker.initialize()
+        playing = threading.Thread(target=speaker.play_wav, args=(sound,), daemon=True)
+        playing.start()
+        print(f"Audio triggered: {sound}; monotonic={time.monotonic():.6f}", flush=True)
+    try:
+        result = ssh(f"cd {RUNTIME}/code && PYTHONPATH={RUNTIME}/deps:scripts python3 -B "
+                     f"scripts/resident_worker_client.py --timeout 40 {shlex.quote(name)} 2>/dev/null | tail -1",
+                     timeout=60)
+    finally:
+        if speaker is not None:
+            playing.join(timeout=20)
+            speaker.close()
+    print("MOTIONDECODE RESULT: " + (result.stdout.strip() or "{}"))
+    try:
+        return 0 if json.loads(result.stdout).get("status") == "pass" else 1
+    except json.JSONDecodeError:
+        return 1
+
+
 def relay_commands(pc_ip: str) -> dict[str, list[str]]:
     return {
         "lidar_guard_relay": ["--interface", "eth0", "--destination", pc_ip, "--port", "47621",
@@ -193,6 +266,42 @@ def supervisor_args(mode: list[str], duration: float, laps: int = 1) -> list[str
 
 def dry(duration: float) -> int:
     return subprocess.run(supervisor_args(["--no-locomotion"], duration), cwd=ROOT).returncode
+
+
+# Patrol interlock arguments: a standing session has no Patrol to pause.
+PATROL_ONLY_FLAGS = {"--patrol-control-socket": 1, "--patrol-pause-timeout": 1, "--hackathon-runtime": 0}
+
+
+def stand_command(duration: float) -> list[str]:
+    """Real reactions (arms and voice) on detections, without walking."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_integrated_demo
+    args = run_integrated_demo.parser().parse_args(
+        supervisor_args(["--real-patrol", "--operator-approved-real-patrol"], duration)[3:])
+    command, skip = [], 0
+    for item in run_integrated_demo.reaction_command(args):
+        if skip:
+            skip -= 1
+        elif item in PATROL_ONLY_FLAGS:
+            skip = PATROL_ONLY_FLAGS[item]
+        else:
+            command.append(item)
+    return command
+
+
+def stand(duration: float, assume_yes: bool) -> int:
+    if worker_status().get("state") != "READY":
+        print("REFUSED: resident worker is not READY; run the worker command")
+        return 1
+    if not assume_yes:
+        print("G1 ARMS WILL MOVE on detections (no walking). Keep people out of arm reach.")
+        try:
+            if input("Type ARMS to start: ").strip() != "ARMS":
+                print("CANCELLED: no G1 command sent")
+                return 1
+        except EOFError:
+            return 1
+    return subprocess.run(stand_command(duration), cwd=ROOT).returncode
 
 
 def run_plan(laps: int | None, minutes: float | None) -> tuple[int, float, str]:
@@ -264,6 +373,13 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("worker", help="start the resident reaction worker (no motion)")
     dry_parser = commands.add_parser("dry", help="camera, YOLO and reaction choice; robot stays still")
     dry_parser.add_argument("--duration", type=float, default=30.)
+    stand_parser = commands.add_parser("stand", help="real arm and voice reactions; G1 does not walk")
+    stand_parser.add_argument("--duration", type=float, default=90.)
+    stand_parser.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+    motion_parser = commands.add_parser("motion", help="play one motion on the standing G1")
+    motion_parser.add_argument("name")
+    motion_parser.add_argument("--voice", help="paired voice as <target>/<file>.wav (default: no voice)")
+    motion_parser.add_argument("--yes", action="store_true", help="skip the typed confirmation")
     run_parser = commands.add_parser("run", help="walk the patrol with reactions")
     group = run_parser.add_mutually_exclusive_group()
     group.add_argument("--laps", type=int)
@@ -281,6 +397,10 @@ def main(argv: list[str] | None = None) -> int:
         return start_worker()
     if args.command == "dry":
         return dry(args.duration)
+    if args.command == "motion":
+        return motion(args.name, args.yes, args.voice)
+    if args.command == "stand":
+        return stand(args.duration, args.yes)
     if args.command == "run":
         return run(args.laps, args.minutes, args.yes)
     return stop()

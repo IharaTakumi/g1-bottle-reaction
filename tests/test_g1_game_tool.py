@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -101,3 +102,32 @@ def test_patrol_laps_and_lan_host_reach_the_command(monkeypatch):
     assert routes == ["192.168.0.82"]
     assert command[command.index("--loops") + 1] == "3"
     assert command[command.index("--locomotion-relay-host") + 1] == "192.168.0.82"
+
+
+def test_stand_drops_only_the_patrol_interlock(monkeypatch):
+    real = ["python", "app.py", "--enable-real-robot", "--confirm-site-ready",
+            "--patrol-control-socket", "/tmp/s.sock", "--patrol-pause-timeout", "30",
+            "--hackathon-runtime", "--headless"]
+    monkeypatch.setitem(sys.modules, "run_integrated_demo", demo)
+    monkeypatch.setattr(demo, "reaction_command", lambda _args: real)
+    assert game.stand_command(90) == ["python", "app.py", "--enable-real-robot",
+                                      "--confirm-site-ready", "--headless"]
+
+
+def test_unknown_motion_is_refused_before_contacting_g1(capsys):
+    assert game.motion("rm -rf /", assume_yes=True) == 1
+    assert "unknown motion" in capsys.readouterr().out
+
+
+def test_catalog_lists_each_target_with_paired_voices():
+    catalog = game.reaction_catalog()
+    person = {entry["motion"]: entry["voices"] for entry in catalog["pools"]["person"]}
+    assert "salute" in person and all(v.startswith("person/person_salute_") for v in person["salute"])
+    assert {"comical_dance", "tekitou_dance"} <= set(catalog["unused"])
+
+
+def test_voice_must_be_a_reaction_wav_inside_the_voice_folder():
+    assert game.voice_path("person/person_salute_1.wav").name == "person_salute_1.wav"
+    for bad in ("../../README.md", "person/../../x.wav", "person/missing.wav"):
+        with pytest.raises(ValueError):
+            game.voice_path(bad)

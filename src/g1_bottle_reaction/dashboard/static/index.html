@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 ゲーム運営</title>
+<style>
+:root {
+  --bg: #f3f3f0; --card: #fff; --ink: #1d1d1b; --muted: #6b6b66; --line: #d4d4cf;
+  --ok: #1f7a3a; --warn: #a86500; --bad: #b3261e; --accent: #1f5fa8; --soft: #f7f7f4;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center;
+  gap: 10px 14px; padding: 10px 16px; background: var(--card); border-bottom: 2px solid var(--ink); }
+h1 { font-size: 17px; margin: 0; }
+h2 { font-size: 14px; margin: 0 0 8px; }
+.badge { border: 2px solid var(--ink); padding: 2px 12px; font-weight: 700; letter-spacing: .04em; }
+.badge.walking { background: #fff1d6; }
+.chip { border: 1px solid var(--line); padding: 1px 8px; background: var(--soft); font-size: 13px; }
+.chip b { margin-right: 4px; }
+.chip.ok b { color: var(--ok); } .chip.warn b { color: var(--warn); } .chip.bad b { color: var(--bad); }
+.spacer { flex: 1; }
+button { font: inherit; min-height: 36px; padding: 0 14px; border: 1.5px solid var(--ink); background: var(--card);
+  cursor: pointer; }
+button:disabled { opacity: .35; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+#estop { min-height: 52px; padding: 0 26px; font-size: 18px; font-weight: 800; color: #fff;
+  background: var(--bad); border-color: var(--bad); }
+#finish { min-height: 52px; font-weight: 700; border-color: var(--warn); color: var(--warn); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; padding: 14px 16px 32px;
+  max-width: 1500px; margin: 0 auto; }
+@media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--card); border: 1.5px solid var(--line); padding: 12px 14px; min-width: 0; }
+.wide { grid-column: 1 / -1; }
+.note { color: var(--muted); font-size: 12px; }
+canvas { width: 100%; height: auto; display: block; background: var(--soft); border: 1px solid var(--line); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin-top: 8px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; }
+.state-ok { color: var(--ok); font-weight: 700; } .state-warn { color: var(--warn); font-weight: 700; }
+.state-bad { color: var(--bad); font-weight: 700; }
+#camera-box { position: relative; background: #222; aspect-ratio: 16 / 9; }
+#camera { width: 100%; height: 100%; object-fit: contain; display: block; }
+#camera-off { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #ddd; font-size: 15px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+td, th { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+fieldset { border: 1px solid var(--line); padding: 8px 12px 12px; margin: 0; min-width: 0; }
+legend { font-weight: 700; padding: 0 4px; }
+fieldset p { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+input[type=number] { width: 72px; min-height: 32px; font: inherit; }
+select { min-height: 32px; font: inherit; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.checks label { display: block; margin: 3px 0; }
+details { margin-top: 12px; border: 1px dashed var(--line); padding: 6px 12px; }
+summary { cursor: pointer; font-weight: 700; }
+#log { max-height: 340px; overflow: auto; font: 12px/1.45 ui-monospace, Menlo, monospace; }
+#log div { padding: 1px 0; border-bottom: 1px solid #eee; white-space: pre-wrap; word-break: break-all; }
+#log .warn { color: var(--bad); } #log .op { color: var(--accent); font-weight: 600; }
+.pools { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.pool h3 { font-size: 14px; margin: 0 0 4px; }
+.pool ul { margin: 0; padding-left: 18px; }
+.pool li.failed { color: var(--bad); }
+#toast { position: fixed; right: 16px; bottom: 16px; max-width: 420px; padding: 10px 14px; background: var(--ink);
+  color: #fff; display: none; z-index: 10; }
+</style>
+</head>
+<body>
+<header>
+  <h1>G1 ゲーム運営</h1>
+  <span class="badge" id="mode">待機</span>
+  <span id="elapsed">—</span>
+  <span id="laps"></span>
+  <span class="chip" id="chip-worker"><b>ワーカー</b><span>—</span></span>
+  <span class="chip" id="chip-telemetry"><b>位置データ</b><span>—</span></span>
+  <span class="chip" id="chip-lidar"><b>LiDAR</b><span>—</span></span>
+  <span class="chip" id="chip-camera"><b>カメラ</b><span>—</span></span>
+  <span class="spacer"></span>
+  <button id="finish" title="本番: 今の周を回り切ってから止まる。調整・dry: すぐ終了">安全停止</button>
+  <button id="estop" title="その場で歩行を止める。腕の力は抜かない">緊急停止</button>
+</header>
+
+<main>
+  <section class="card">
+    <h2>地図（自己位置の推定）</h2>
+    <canvas id="map" width="760" height="380"></canvas>
+    <p class="note">SLAM の odometry による推定で、実測ではありません。原点と向きは本番開始時の位置です。</p>
+    <dl class="kv">
+      <dt>区間</dt><dd id="phase">—</dd>
+      <dt>進み / 残り</dt><dd id="progress">—</dd>
+      <dt>推定位置</dt><dd id="pose">—</dd>
+      <dt>巡回の状態</dt><dd id="patrol-state">—</dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2>カメラ（YOLO の枠つき）</h2>
+    <div id="camera-box">
+      <img id="camera" alt="">
+      <div id="camera-off">映像なし（調整・dry・本番の実行中に表示）</div>
+    </div>
+    <dl class="kv">
+      <dt>映像</dt><dd id="camera-stats">—</dd>
+      <dt>見えているもの</dt><dd id="visible">—</dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2>障害物（LiDAR）</h2>
+    <dl class="kv">
+      <dt>前方</dt><dd id="lidar-front">—</dd>
+      <dt>後方</dt><dd id="lidar-rear">—</dd>
+      <dt>旋回中</dt><dd id="lidar-turn">—</dd>
+      <dt>停止距離</dt><dd id="lidar-stop">—</dd>
+      <dt>データの鮮度</dt><dd id="lidar-age">—</dd>
+    </dl>
+    <p class="note">ふさがれると歩行を止め、最大 10 秒待って通れるようになれば続きから再開します。</p>
+  </section>
+
+  <section class="card">
+    <h2>リアクション</h2>
+    <table>
+      <thead><tr><th>時刻</th><th>対象</th><th>モーション</th><th>音声</th><th>結果</th></tr></thead>
+      <tbody id="reactions"><tr><td colspan="5" class="note">まだありません</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card wide">
+    <h2>リアクションの設定（何を見つけたら何が出るか）</h2>
+    <div class="pools" id="pools"></div>
+    <p class="note">見つけるたびに、その対象の候補を全部 1 回ずつ、順番をシャッフルして出します（声はモーションと組のものから 1 本）。
+      複数が同時に見えたときは、ぬいぐるみ → バナナ → 人 の順で優先します。起動時チェックに落ちたモーションは、その回のゲームでは出ません。</p>
+    <p class="note" id="unused"></p>
+  </section>
+
+  <section class="card wide">
+    <h2>操作</h2>
+    <div class="controls">
+      <fieldset>
+        <legend>1. 準備</legend>
+        <p>G1 の状態を読み取りで確認し、リアクション用ワーカーを起動します。腕は動きません。</p>
+        <div class="row">
+          <button data-job="check">状態を確認</button>
+          <button data-job="worker">ワーカー起動</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>2. 調整（その場リアクション）</legend>
+        <p>歩きません。人・バナナ・ぬいぐるみを見つけると、実機で腕と音声が動きます。</p>
+        <div class="row">秒数 <input type="number" id="stand-duration" value="90" min="5" max="1800">
+          <button data-job="stand">開始</button></div>
+      </fieldset>
+      <fieldset>
+        <legend>dry（確認だけ）</legend>
+        <p>歩かず、腕も音声も G1 では出しません。カメラ → YOLO → リアクションの選択を確認します。</p>
+        <div class="row">秒数 <input type="number" id="dry-duration" value="30" min="5" max="1800">
+          <button data-job="dry">開始</button></div>
+      </fieldset>
+      <fieldset>
+        <legend>3. 本番（巡回あり）</legend>
+        <div class="row">
+          <label><input type="radio" name="run-kind" value="laps" checked> 周回</label>
+          <input type="number" id="run-laps" value="3" min="1" max="100">
+          <label><input type="radio" name="run-kind" value="minutes"> 分</label>
+          <input type="number" id="run-minutes" value="5" min="1" max="30">
+        </div>
+        <div class="checks" id="checklist">
+          <label><input type="checkbox"> リモコンを持つ人がいて、手に持っている</label>
+          <label><input type="checkbox"> コースと G1 の周りに人がいない</label>
+          <label><input type="checkbox"> 停止手段（リモコン・緊急停止）を一度試した</label>
+        </div>
+        <div class="row"><button data-job="run" class="primary" id="run-start">本番開始</button></div>
+      </fieldset>
+      <fieldset>
+        <legend>4. 解放</legend>
+        <p>ゲームを止め、ワーカーと中継を止めて G1 を他の人に返します。</p>
+        <div class="row"><button id="release">解放する</button></div>
+      </fieldset>
+    </div>
+    <details id="manual">
+      <summary>手動モーション（調整用）</summary>
+      <p class="note">立っている G1 で、選んだモーションを 1 回だけ再生します。ゲームや調整の実行中は使えません。</p>
+      <div class="row"><select id="motion-name"></select></div>
+      <div class="row">
+        <label><input type="radio" name="voice-mode" value="off" checked> 声なし</label>
+        <label><input type="radio" name="voice-mode" value="on"> 声あり</label>
+        <select id="motion-voice"></select>
+      </div>
+      <p class="note" id="motion-when"></p>
+      <div class="row"><button id="motion-play">再生</button></div>
+    </details>
+    <details>
+      <summary>本番中の設定変更（速度・距離・音量）</summary>
+      <p class="note">次の段階で対応します。速度は最大 0.8 m/s（0.5 m/s を超えると未検証）、距離は 1〜5 m、音量は 0〜100 で、変えた値は次の周から効きます。</p>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>G1 の状態（「状態を確認」の結果）</h2>
+    <table><tbody id="checks"><tr><td class="note">「状態を確認」を押すと表示されます</td></tr></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>イベントログ</h2>
+    <div id="log"></div>
+    <p class="note" id="log-file"></p>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const MODE = {idle: "待機", check: "状態確認中", worker: "ワーカー起動中", dry: "dry", stand: "調整中",
+  run: "本番", motion: "手動モーション", stop: "解放中"};
+const PHASE = {FORWARD_OUT: "往路", TURN_BACK: "折り返しの旋回", FORWARD_RETURN: "復路",
+  TURN_HOME: "帰りの旋回", FORWARD_HOME: "帰着", PAUSED: "一時停止（リアクション中）", STOPPED: "停止"};
+const TARGET = {person: "人", banana: "バナナ", plushie: "ぬいぐるみ", manual: "手動"};
+const STATE_JA = {CLEAR: "通れる", BLOCKED: "ふさがれている", STALE: "データが古い", CONFIRMING: "確認中"};
+const MOTION_JA = {salute: "敬礼", sokoni_ita: "そこにいたのか", odoroku: "おどろく", detekoi: "でてこい",
+  kinniku: "筋肉", surprise: "surprise（びっくり）", chotto_bikkuri: "ちょっとびっくり", welcome: "ウェルカム",
+  hisashiburi: "ひさしぶり", comical_dance: "こみかるダンス", tekitou_dance: "適当ダンス"};
+const WHEN = {person: "人を見つけたとき", banana: "バナナを見つけたとき", plushie: "ぬいぐるみを見つけたとき"};
+const motionLabel = (m) => MOTION_JA[m] ? `${MOTION_JA[m]}（${m}）` : m;
+const $ = (id) => document.getElementById(id);
+let state = null, trail = [], trailJob = null, cameraOn = false;
+
+const hhmmss = (t) => new Date(t * 1000).toLocaleTimeString("ja-JP", {hour12: false});
+const fmt = (v, d = 2, unit = "") => (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d) + unit;
+function toast(text) { const t = $("toast"); t.textContent = text; t.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = "none", 6000); }
+function chip(id, level, text) { const c = $(id); c.className = "chip " + level; c.querySelector("span").textContent = text; }
+
+async function act(action, params = {}) {
+  try {
+    const response = await fetch("/api/action", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({action, params})});
+    const result = await response.json();
+    if (!result.ok) toast("できませんでした: " + (result.error || response.status));
+    return result;
+  } catch (error) { toast("ダッシュボードに届きません: " + error); }
+}
+
+$("estop").onclick = () => act("estop");
+$("finish").onclick = () => act("finish");
+$("release").onclick = () => { if (confirm("ゲームを止めて、G1 を他の人に返しますか？")) act("release"); };
+document.querySelectorAll("button[data-job]").forEach((button) => button.onclick = () => {
+  const job = button.dataset.job;
+  if (job === "stand") {
+    if (!confirm("G1 の腕と音声が実機で動きます（歩きません）。腕が届く範囲に人がいないことを確認しましたか？")) return;
+    return act("stand", {duration: Number($("stand-duration").value), confirm: true});
+  }
+  if (job === "dry") return act("dry", {duration: Number($("dry-duration").value)});
+  if (job === "run") {
+    const boxes = [...document.querySelectorAll("#checklist input")];
+    if (!boxes.every((b) => b.checked)) return toast("開始前チェックをすべて確認してください");
+    const byMinutes = document.querySelector("input[name=run-kind]:checked").value === "minutes";
+    const plan = byMinutes ? $("run-minutes").value + " 分" : $("run-laps").value + " 周";
+    if (!confirm(`G1 が歩きます（${plan}）。コースに人がいないこと、リモコンを持っていることを確認しましたか？`)) return;
+    boxes.forEach((b) => b.checked = false);
+    return act("run", byMinutes ? {minutes: Number($("run-minutes").value), confirm: true}
+                                : {laps: Number($("run-laps").value), confirm: true});
+  }
+  return act(job);
+});
+function triggersOf(motion) {
+  const pools = (state && state.catalog && state.catalog.pools) || {};
+  return Object.entries(pools).filter(([, list]) => list.some((e) => e.motion === motion)).map(([t]) => t);
+}
+function voicesOf(motion) {
+  const pools = (state && state.catalog && state.catalog.pools) || {};
+  return Object.values(pools).flatMap((list) => list.filter((e) => e.motion === motion).flatMap((e) => e.voices));
+}
+function refreshManual() {
+  const name = $("motion-name").value, voices = voicesOf(name), select = $("motion-voice");
+  const current = select.value;
+  select.innerHTML = "";
+  voices.forEach((v) => select.add(new Option(v.split("/").pop(), v)));
+  if (voices.includes(current)) select.value = current;
+  const voiceOn = document.querySelector("input[name=voice-mode][value=on]");
+  voiceOn.disabled = !voices.length;
+  if (!voices.length) document.querySelector("input[name=voice-mode][value=off]").checked = true;
+  select.disabled = !voices.length || !voiceOn.checked;
+  const when = triggersOf(name).map((t) => WHEN[t]);
+  $("motion-when").textContent = (when.length ? "ゲームでは: " + when.join("・") + " に出ます。" : "ゲームでは出ません（手動の確認用）。")
+    + (voices.length ? "" : "このモーションと組の声はありません。");
+}
+$("motion-name").onchange = refreshManual;
+document.querySelectorAll("input[name=voice-mode]").forEach((r) => r.onchange = refreshManual);
+$("motion-play").onclick = () => {
+  const name = $("motion-name").value;
+  const withVoice = document.querySelector("input[name=voice-mode]:checked").value === "on";
+  const voice = withVoice ? $("motion-voice").value : null;
+  const what = motionLabel(name) + (voice ? "、声: " + voice.split("/").pop() : "、声なし");
+  if (confirm(`G1 の腕が動きます（${what}）。腕が届く範囲に人がいないことを確認しましたか？`))
+    act("motion", voice ? {name, voice, confirm: true} : {name, confirm: true});
+};
+function renderPools(catalog, failed) {
+  if (!catalog) return;
+  $("pools").innerHTML = Object.entries(catalog.pools).map(([target, list]) => `<div class="pool"><h3>${WHEN[target] || target}</h3><ul>`
+    + list.map((e) => `<li class="${failed.includes(e.motion) ? "failed" : ""}">${motionLabel(e.motion)}`
+      + `<span class="note">　声 ${e.voices.length} 本${failed.includes(e.motion) ? "・起動時チェック不合格で今は出ない" : ""}</span></li>`).join("")
+    + "</ul></div>").join("");
+  $("unused").textContent = catalog.unused.length
+    ? "ゲームでは使わないモーション: " + catalog.unused.map(motionLabel).join("、") + "（手動では再生できます。ダンスは約 11 秒巡回が止まるため外しています）" : "";
+}
+
+function render(s) {
+  state = s;
+  const mode = s.mode, running = s.running, job = s.job;
+  $("mode").textContent = MODE[mode] || mode;
+  $("mode").className = "badge" + (mode === "run" ? " walking" : "");
+  $("elapsed").textContent = running && job ? "経過 " + new Date((s.now - job.started) * 1000).toISOString().substr(14, 5) : "";
+  const patrol = s.patrol || {};
+  const target = patrol.loops_target ?? (job && job.params && job.params.laps);
+  $("laps").textContent = mode === "run" ? `周 ${patrol.loops_completed ?? s.game.loops_completed} / ${target ?? "時間制"}`
+    + (patrol.finish_requested ? "（この周で終了）" : "") : "";
+
+  const worker = s.worker || {};
+  chip("chip-worker", worker.state === "READY" ? "ok" : worker.state === "EXECUTING" ? "warn" : worker.state ? "bad" : "",
+       worker.state || "未起動");
+  const odom = patrol.odom;
+  const age = odom && odom.transport_age_s;
+  chip("chip-telemetry", mode !== "run" ? "" : age === undefined || age === null ? "bad" : age < 0.2 ? "ok" : age < 0.5 ? "warn" : "bad",
+       mode !== "run" ? "—" : age === null || age === undefined ? "なし" : fmt(age * 1000, 0, " ms"));
+  const guard = patrol.guard || {};
+  const front = guard.front_state;
+  chip("chip-lidar", !front ? "" : front === "CLEAR" ? "ok" : front === "BLOCKED" ? "bad" : "warn", STATE_JA[front] || "—");
+  const frameFresh = s.frame_age_s !== null && s.frame_age_s < 1.0;
+  chip("chip-camera", frameFresh ? "ok" : running && ["dry", "stand", "run"].includes(mode) ? "warn" : "", frameFresh ? "映像あり" : "—");
+
+  document.querySelectorAll("button[data-job]").forEach((b) => b.disabled = running);
+  $("motion-play").disabled = running || worker.state !== "READY";
+  $("finish").disabled = !(running && ["dry", "stand", "run"].includes(mode));
+  $("release").disabled = running && !["dry", "stand", "run"].includes(mode);
+
+  const select = $("motion-name");
+  if (!select.options.length) {
+    s.motions.forEach((m) => {
+      const when = triggersOf(m).map((t) => ({person: "人", banana: "バナナ", plushie: "ぬいぐるみ"})[t]);
+      select.add(new Option(motionLabel(m) + (when.length ? " ― " + when.join("・") : " ― ゲームでは不使用"), m));
+    });
+    refreshManual();
+  }
+  const failed = Object.entries(worker.preflight || {}).filter(([, ok]) => !ok).map(([k]) => k);
+  [...select.options].forEach((o) => o.disabled = failed.includes(o.value));
+  renderPools(s.catalog, failed);
+
+  renderCamera(frameFresh, s.game.camera, s.game.visible);
+  renderMap(s);
+  renderLidar(guard);
+  renderReactions(s.game.reactions);
+  renderChecks(s.game.checks, s.game.check_result, worker);
+  renderLog(s);
+}
+
+function renderCamera(fresh, camera, visible) {
+  if (fresh && !cameraOn) { $("camera").src = "/api/camera.mjpg?" + Date.now(); cameraOn = true; }
+  if (!fresh && cameraOn) { $("camera").removeAttribute("src"); cameraOn = false; }
+  $("camera-off").style.display = fresh ? "none" : "flex";
+  $("camera-stats").textContent = camera && camera.fps ? `${camera.resolution} ${fmt(camera.fps, 1)} fps、YOLO ${fmt(camera.yolo_fps, 1)} fps（推論 ${fmt(camera.inference_ms, 1)} ms）` : "—";
+  const names = Object.entries(visible || {}).map(([k, v]) => `${TARGET[k] || k}（${fmt(v.conf, 2)}）`);
+  $("visible").textContent = names.length ? names.join("、") : "なし";
+}
+
+function renderLidar(guard) {
+  const last = guard.last || {};
+  const nearest = last.nearest_m || {};
+  const line = (dir, st) => `${STATE_JA[st] || "—"}、一番近い物 ${fmt(nearest[dir], 2, " m")}`;
+  $("lidar-front").innerHTML = `<span class="${guard.front_state === "CLEAR" ? "state-ok" : guard.front_state ? "state-bad" : ""}">${line("front", guard.front_state)}</span>`;
+  $("lidar-rear").textContent = line("rear", guard.rear_state);
+  $("lidar-turn").textContent = line("turn", last.turn_state);
+  $("lidar-stop").textContent = fmt(last.stop_distance_m, 2, " m");
+  $("lidar-age").textContent = guard.relay_age_s === undefined ? "—" : `${fmt((guard.relay_age_s || 0) * 1000, 0, " ms")} 前、${fmt(guard.relay_rate_hz, 1)} Hz`;
+}
+
+function routePose(origin, odom) {
+  const dx = odom.x - origin.x, dy = odom.y - origin.y, c = Math.cos(origin.yaw), s = Math.sin(origin.yaw);
+  return {u: c * dx + s * dy, v: -s * dx + c * dy, h: odom.yaw - origin.yaw};
+}
+
+function renderMap(s) {
+  const canvas = $("map"), g = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
+  g.clearRect(0, 0, W, H);
+  const patrol = s.patrol || {}, route = patrol.route || {forward_m: 2, return_m: 4, home_m: 2};
+  const uMin = Math.min(0, route.forward_m - route.return_m) - 1, uMax = route.forward_m + 1;
+  const scale = Math.min((W - 40) / (uMax - uMin), (H - 40) / 3);
+  const X = (u) => 20 + (u - uMin) * scale, Y = (v) => H / 2 - v * scale;
+  // 1 m grid
+  g.strokeStyle = "#e3e3de"; g.lineWidth = 1;
+  for (let u = Math.ceil(uMin); u <= uMax; u++) { g.beginPath(); g.moveTo(X(u), 10); g.lineTo(X(u), H - 10); g.stroke(); }
+  for (let v = -1; v <= 1; v++) { g.beginPath(); g.moveTo(10, Y(v)); g.lineTo(W - 10, Y(v)); g.stroke(); }
+  // planned route
+  g.setLineDash([8, 6]); g.strokeStyle = "#888"; g.lineWidth = 3;
+  g.beginPath(); g.moveTo(X(route.forward_m - route.return_m), Y(0)); g.lineTo(X(route.forward_m), Y(0)); g.stroke();
+  g.setLineDash([]);
+  g.fillStyle = "#444"; g.font = "13px system-ui";
+  [[0, "スタート"], [route.forward_m, "折り返し"], [route.forward_m - route.return_m, "折り返し"]].forEach(([u, label]) => {
+    g.beginPath(); g.arc(X(u), Y(0), 6, 0, 2 * Math.PI); g.fill(); g.fillText(label, X(u) - 20, Y(0) + 24);
+  });
+  if (!patrol.origin || !patrol.odom) {
+    g.fillStyle = "#6b6b66"; g.font = "15px system-ui";
+    g.fillText("本番（巡回）が始まると、推定位置を表示します", 24, 30);
+    return;
+  }
+  if (s.job && trailJob !== s.job.started) { trail = []; trailJob = s.job.started; }
+  const p = routePose(patrol.origin, patrol.odom);
+  const lastPoint = trail[trail.length - 1];
+  if (!lastPoint || Math.hypot(lastPoint.u - p.u, lastPoint.v - p.v) > 0.02) trail.push(p);
+  if (trail.length > 3000) trail.shift();
+  g.strokeStyle = "#1f5fa8"; g.lineWidth = 2; g.beginPath();
+  trail.forEach((q, i) => i ? g.lineTo(X(q.u), Y(q.v)) : g.moveTo(X(q.u), Y(q.v))); g.stroke();
+  // obstacle ahead
+  const guard = patrol.guard || {}, last = guard.last || {}, near = (last.nearest_m || {}).front;
+  if (near !== null && near !== undefined && near < 3) {
+    const ox = p.u + Math.cos(p.h) * near, oy = p.v + Math.sin(p.h) * near;
+    g.strokeStyle = guard.front_state === "BLOCKED" ? "#b3261e" : "#a86500"; g.lineWidth = 5;
+    g.beginPath(); g.moveTo(X(ox - Math.sin(p.h) * 0.3), Y(oy + Math.cos(p.h) * 0.3));
+    g.lineTo(X(ox + Math.sin(p.h) * 0.3), Y(oy - Math.cos(p.h) * 0.3)); g.stroke();
+    g.fillStyle = g.strokeStyle; g.fillText(`障害物 ${near.toFixed(2)} m`, X(ox) + 8, Y(oy) - 8);
+  }
+  // robot
+  g.save(); g.translate(X(p.u), Y(p.v)); g.rotate(-p.h);
+  g.fillStyle = "#1d1d1b"; g.beginPath(); g.moveTo(16, 0); g.lineTo(-10, 9); g.lineTo(-10, -9); g.closePath(); g.fill();
+  g.restore();
+  $("pose").textContent = `前後 ${fmt(p.u, 2, " m")}、横 ${fmt(p.v, 2, " m")}、向き ${fmt(p.h * 180 / Math.PI, 0, "°")}`;
+}
+
+function renderPatrolText(s) {
+  const patrol = s.patrol || {};
+  $("phase").textContent = s.mode === "run" ? (PHASE[patrol.phase] || patrol.phase || "—") : "—";
+  $("progress").textContent = patrol.remaining_m !== null && patrol.remaining_m !== undefined
+    ? `${fmt(patrol.progress_m, 2, " m")} / ${fmt(patrol.remaining_m, 2, " m")}`
+    : patrol.turn_remaining_rad !== null && patrol.turn_remaining_rad !== undefined
+      ? `${fmt((patrol.turn_progress_rad || 0) * 180 / Math.PI, 0, "°")} / ${fmt(patrol.turn_remaining_rad * 180 / Math.PI, 0, "°")}` : "—";
+  const flags = [patrol.paused ? "一時停止（" + (patrol.pause_reason || "") + "）" : null,
+    patrol.telemetry_recovering ? "データ復帰待ち" : null, patrol.error ? "エラー: " + patrol.error : null].filter(Boolean);
+  $("patrol-state").innerHTML = s.mode !== "run" ? "—" :
+    `<span class="${patrol.error ? "state-bad" : flags.length ? "state-warn" : "state-ok"}">${flags.join("、") || "正常"}</span>`;
+  if (!patrol.odom) $("pose").textContent = "—";
+}
+
+function renderReactions(list) {
+  const body = $("reactions");
+  if (!list.length) { body.innerHTML = '<tr><td colspan="5" class="note">まだありません</td></tr>'; return; }
+  body.innerHTML = list.map((r) => {
+    const cls = r.status === "pass" ? "state-ok" : r.status === "running" ? "state-warn" : "state-bad";
+    const label = {pass: "PASS", running: "実行中", recoverable_abort: "中止→復帰"}[r.status] || r.status;
+    const extra = r.duration_s ? `（${r.duration_s} 秒）` : "";
+    return `<tr><td>${hhmmss(r.time)}</td><td>${TARGET[r.target] || r.target}</td><td>${r.motion ? motionLabel(r.motion) : "—"}</td>`
+      + `<td>${r.voice || "—"}</td><td class="${cls}">${label}${extra}${r.reason ? " " + r.reason : ""}</td></tr>`;
+  }).join("");
+}
+
+function renderChecks(checks, result, worker) {
+  const rows = Object.entries(checks || {});
+  if (!rows.length) return;
+  const cls = {OK: "state-ok", WARN: "state-warn", FAIL: "state-bad"};
+  $("checks").innerHTML = rows.map(([name, c]) => `<tr><td class="${cls[c.level]}">${c.level}</td><td>${name}</td><td>${c.detail}</td></tr>`).join("")
+    + (result ? `<tr><td colspan="3"><b>結果: ${result}</b></td></tr>` : "");
+}
+
+function renderLog(s) {
+  const entries = [...s.notices.map((n) => ({...n, op: true})), ...s.game.events].sort((a, b) => b.time - a.time).slice(0, 120);
+  $("log").innerHTML = entries.map((e) => `<div class="${e.op ? "op" : ""} ${e.warn ? "warn" : ""}">${hhmmss(e.time)}  ${e.text.replace(/</g, "&lt;")}</div>`).join("");
+  $("log-file").textContent = s.job ? "ログファイル: " + s.job.log : "";
+}
+
+const source = new EventSource("/api/stream");
+source.onmessage = (event) => { const s = JSON.parse(event.data); render(s); renderPatrolText(s); };
+source.onerror = () => { $("mode").textContent = "ダッシュボードに接続できません"; };
+</script>
+</body>
+</html>

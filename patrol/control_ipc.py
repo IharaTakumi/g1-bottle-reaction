@@ -72,6 +72,8 @@ class PatrolControlServer:
             return {"ok": True, **self.controller.control_status()}
         if operation == "reaction_ready":
             return {"ok": True, **self.controller.verify_reaction_ready()}
+        if operation == "finish":
+            return {"ok": True, **self.controller.request_finish()}
         if operation == "stop":
             self.controller.stop()
             return {"ok": True, **self.controller.control_status()}
