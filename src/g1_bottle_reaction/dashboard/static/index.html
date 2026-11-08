@@ -69,6 +69,9 @@ summary { cursor: pointer; font-weight: 700; }
 </style>
 </head>
 <body>
+<div id="outdated" style="display:none;background:#b3261e;color:#fff;padding:8px 16px;font-weight:700">
+  ダッシュボードのサーバーが古い版です。ゲームが止まっているときに、サーバーを止めて起動し直してください（scripts/g1_dashboard.py）。
+</div>
 <header>
   <h1>G1 ゲーム運営</h1>
   <span class="badge" id="mode">待機</span>
@@ -268,12 +271,30 @@ function triggersOf(motion) {
   const pools = (state && state.catalog && state.catalog.pools) || {};
   return Object.entries(pools).filter(([, list]) => list.some((e) => e.motion === motion)).map(([t]) => t);
 }
-function voicesOf(motion) {
+function voicesOf(target, motion) {
   const pools = (state && state.catalog && state.catalog.pools) || {};
-  return Object.values(pools).flatMap((list) => list.filter((e) => e.motion === motion).flatMap((e) => e.voices));
+  return (pools[target] || []).filter((e) => e.motion === motion).flatMap((e) => e.voices);
+}
+const selected = () => { const [target, name] = $("motion-name").value.split(":"); return {target, name}; };
+function buildMotionOptions(catalog) {
+  const select = $("motion-name");
+  select.innerHTML = "";
+  Object.entries(catalog.pools).forEach(([target, list]) => {
+    const group = document.createElement("optgroup");
+    group.label = WHEN[target] || target;
+    list.forEach((e) => group.appendChild(new Option(motionLabel(e.motion), `${target}:${e.motion}`)));
+    select.appendChild(group);
+  });
+  if (catalog.unused.length) {
+    const group = document.createElement("optgroup");
+    group.label = "ゲームでは不使用（確認用）";
+    catalog.unused.forEach((m) => group.appendChild(new Option(motionLabel(m), `unused:${m}`)));
+    select.appendChild(group);
+  }
+  refreshManual();
 }
 function refreshManual() {
-  const name = $("motion-name").value, voices = voicesOf(name), select = $("motion-voice");
+  const {target, name} = selected(), voices = voicesOf(target, name), select = $("motion-voice");
   const current = select.value;
   select.innerHTML = "";
   voices.forEach((v) => select.add(new Option(v.split("/").pop(), v)));
@@ -284,12 +305,12 @@ function refreshManual() {
   select.disabled = !voices.length || !voiceOn.checked;
   const when = triggersOf(name).map((t) => WHEN[t]);
   $("motion-when").textContent = (when.length ? "ゲームでは: " + when.join("・") + " に出ます。" : "ゲームでは出ません（手動の確認用）。")
-    + (voices.length ? "" : "このモーションと組の声はありません。");
+    + (voices.length ? `声は${WHEN[target] || ""}の組のものから選べます。` : "このモーションと組の声はありません。");
 }
 $("motion-name").onchange = refreshManual;
 document.querySelectorAll("input[name=voice-mode]").forEach((r) => r.onchange = refreshManual);
 $("motion-play").onclick = () => {
-  const name = $("motion-name").value;
+  const {name} = selected();
   const withVoice = document.querySelector("input[name=voice-mode]:checked").value === "on";
   const voice = withVoice ? $("motion-voice").value : null;
   const what = motionLabel(name) + (voice ? "、声: " + voice.split("/").pop() : "、声なし");
@@ -335,16 +356,15 @@ function render(s) {
   $("finish").disabled = !(running && ["dry", "stand", "run"].includes(mode));
   $("release").disabled = running && !["dry", "stand", "run"].includes(mode);
 
+  $("outdated").style.display = (!s.catalog || s.server_outdated) ? "block" : "none";
   const select = $("motion-name");
-  if (!select.options.length) {
-    s.motions.forEach((m) => {
-      const when = triggersOf(m).map((t) => ({person: "人", banana: "バナナ", plushie: "ぬいぐるみ"})[t]);
-      select.add(new Option(motionLabel(m) + (when.length ? " ― " + when.join("・") : " ― ゲームでは不使用"), m));
-    });
-    refreshManual();
-  }
+  if (s.catalog && !select.options.length) buildMotionOptions(s.catalog);
   const failed = Object.entries(worker.preflight || {}).filter(([, ok]) => !ok).map(([k]) => k);
-  [...select.options].forEach((o) => o.disabled = failed.includes(o.value));
+  [...select.options].forEach((o) => {
+    const motion = o.value.split(":")[1];
+    o.disabled = failed.includes(motion);
+    o.text = motionLabel(motion) + (failed.includes(motion) ? "（起動時チェック不合格）" : "");
+  });
   renderPools(s.catalog, failed);
 
   renderCamera(frameFresh, s.game.camera, s.game.visible);

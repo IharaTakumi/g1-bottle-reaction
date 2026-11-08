@@ -48,6 +48,13 @@ def process_alive(pid: int) -> bool:
     return state != "Z" and b"g1_game.py" in command
 
 
+def code_stamp() -> float:
+    """Newest change to the code this server runs; a newer one means restart."""
+    files = [*Path(__file__).parent.glob("*.py"), ROOT / "scripts" / "g1_game.py",
+             ROOT / "src" / "g1_bottle_reaction" / "game_vision" / "dual.py"]
+    return max(path.stat().st_mtime for path in files if path.exists())
+
+
 def job_arguments(kind: str, params: dict) -> list[str]:
     if kind not in JOBS:
         raise ValueError(f"unknown command {kind}")
@@ -100,6 +107,7 @@ class Dashboard:
         self.notices: list[dict] = []
         self._log_offset = 0
         self.catalog = g1_game.reaction_catalog()
+        self.code_stamp = code_stamp()
         self._stop = threading.Event()
         self._reattach()
         for target in (self._follow_log, self._poll_patrol, self._poll_worker):
@@ -295,7 +303,8 @@ class Dashboard:
                 "worker": {k: self.worker.get(k) for k in ("state", "fault", "preflight", "weight")},
                 "worker_age_s": (time.time() - self.worker_at) if self.worker_at else None,
                 "frame_age_s": frame_age, "game": self.view.snapshot(), "notices": self.notices[:20],
-                "motions": sorted(g1_game.GAME_REACTIONS), "catalog": self.catalog, "lan_host": g1_game.LAN_HOST,
+                "motions": sorted(g1_game.GAME_REACTIONS), "catalog": self.catalog,
+                "server_outdated": code_stamp() > self.code_stamp, "lan_host": g1_game.LAN_HOST,
                 "ssh_target": g1_game.SSH_TARGET,
             }
 
